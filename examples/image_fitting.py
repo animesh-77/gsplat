@@ -164,9 +164,19 @@ def main(
     else:
         gt_image = torch.ones((height, width, 3)) * 1.0
         # make top left and bottom right red, blue
-        gt_image[: height // 2, : width // 2, :] = torch.tensor([1.0, 0.0, 0.0])
-        gt_image[height // 2 :, width // 2 :, :] = torch.tensor([0.0, 0.0, 1.0])
-
+        # gt_image[: height // 2, : width // 2, :] = torch.tensor([1.0, 0.0, 0.0])
+        # # red
+        # gt_image[height // 2 :, width // 2 :, :] = torch.tensor([0.0, 0.0, 1.0])
+        # # blue
+        # make a red and blue checker square pattern
+        for i in range(height):
+            for j in range(width):
+                if (i // 32) % 2 == 0:
+                    if (j // 32) % 2 == 0:
+                        gt_image[i, j] = torch.tensor([1.0, 0.0, 0.0])
+                else:
+                    if (j // 32) % 2 == 1:
+                        gt_image[i, j] = torch.tensor([0.0, 0.0, 1.0])
     trainer = SimpleTrainer(gt_image=gt_image, num_points=num_points)
     trainer.train(
         iterations=iterations,

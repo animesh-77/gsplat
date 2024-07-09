@@ -19,7 +19,8 @@ from rotation import Quaternion
 #-------------------------------------------------------------------------------
 
 class SceneManager:
-    INVALID_POINT3D = np.uint64(-1)
+    # INVALID_POINT3D = np.uint64(-1)
+    INVALID_POINT3D = np.array(-1).astype(np.uint64)
 
     def __init__(self, colmap_results_folder, image_path=None):
         self.folder = colmap_results_folder
@@ -96,15 +97,19 @@ class SceneManager:
                     raise IOError('no cameras file found')
     
     def _load_cameras_bin(self, input_file):
+        # self is an instance of SceneManager
         self.cameras = OrderedDict()
 
         with open(input_file, 'rb') as f:
-            num_cameras = struct.unpack('L', f.read(8))[0]
+            num_cameras = struct.unpack('Q', f.read(8))[0]
+            # struct.unpack always returns a tuple
 
             for _ in range(num_cameras):
-                camera_id, camera_type, w, h = struct.unpack('IiLL', f.read(24))
+                camera_id, camera_type, w, h = struct.unpack('IiQQ', f.read(24))
+                # I unsigned int: 4, i int: 4, Q unsigned long long: 8 size in bytes
                 num_params = Camera.GetNumParams(camera_type)
                 params = struct.unpack('d' * num_params, f.read(8 * num_params))
+                # d double: 8 size in bytes
                 self.cameras[camera_id] = Camera(camera_type, w, h, params)
                 self.last_camera_id = max(self.last_camera_id, camera_id)
 
@@ -140,8 +145,11 @@ class SceneManager:
         self.images = OrderedDict()
 
         with open(input_file, 'rb') as f:
-            num_images = struct.unpack('L', f.read(8))[0]
+            num_images = struct.unpack('Q', f.read(8))[0]
+            # Q unsigned long long: 8 size in bytes
             image_struct = struct.Struct('<I 4d 3d I')
+            # I unsigned int: 4, d double: 8 size in bytes
+            # 4 + 7*8 + 4 = 64 size in bytes
             for _ in range(num_images):
                 data = image_struct.unpack(f.read(image_struct.size))
                 image_id = data[0]
@@ -149,6 +157,7 @@ class SceneManager:
                 t = np.array(data[5:8])
                 camera_id = data[8]
                 name = b''.join(c for c in iter(lambda: f.read(1), b'\x00')).decode()
+                # from characters to string. the string ends with a null byte
 
                 image = Image(name, camera_id, q, t)
                 num_points2D = struct.unpack('Q', f.read(8))[0]
@@ -159,11 +168,17 @@ class SceneManager:
                 # ('Q'). This is significantly faster than using O(num_points2D) f.read
                 # calls, experiments show >7x improvements in 60 image model, 23s -> 3s.
                 points_array = array.array('d')
+                # an array of d doubles
+                # d double: 8 bytes in size
                 points_array.fromfile(f, 3 * num_points2D)
+                # instructed to read 3 * num_points2D doubles from the file.
                 points_elements = np.array(points_array).reshape((num_points2D, 3))
                 image.points2D = points_elements[:, :2]
+                # shape (num_points2D, 2)
 
                 ids_array = array.array('Q')
+                # an array of Q unsigned long long integers
+                # Q unsigned long long: 8 bytes in size
                 ids_array.frombytes(points_elements[:, 2].tobytes())
                 image.point3D_ids = np.array(ids_array, dtype=np.uint64).reshape(
                     (num_points2D,))
@@ -228,7 +243,8 @@ class SceneManager:
 
     def _load_points3D_bin(self, input_file):
         with open(input_file, 'rb') as f:
-            num_points3D = struct.unpack('L', f.read(8))[0]
+            num_points3D = struct.unpack('Q', f.read(8))[0]
+            # Q unsigned long long: 8 size in bytes
 
             self.points3D = np.empty((num_points3D, 3))
             self.point3D_ids = np.empty(num_points3D, dtype=np.uint64)
@@ -238,6 +254,10 @@ class SceneManager:
             self.point3D_errors = np.empty(num_points3D)
 
             data_struct = struct.Struct('<Q 3d 3B d Q')
+            # Q unsigned long long: 8, d double: 8, 
+            # B unsigned char: 1, d double: 8, Q unsigned long long: 8
+            # 8 + 3*8 + 3*1 + 8 + 8 = 21 size in bytes
+            # data_struct = struct.Struct('QdddBBBd')
 
             for i in range(num_points3D):
                 data = data_struct.unpack(f.read(data_struct.size))
@@ -272,13 +292,13 @@ class SceneManager:
 
                 self.point3D_ids.append(point3D_id)
                 self.point3D_id_to_point3D_idx[point3D_id] = len(self.points3D)
-                self.points3D.append(map(np.float64, data[1:4]))
-                self.point3D_colors.append(map(np.uint8, data[4:7]))
+                self.points3D.append(list(map(np.float64, data[1:4])))
+                self.point3D_colors.append(list(map(np.uint8, data[4:7])))
                 self.point3D_errors.append(np.float64(data[7]))
 
                 # load (image id, point2D idx) pairs
                 self.point3D_id_to_images[point3D_id] = \
-                    np.array(map(np.uint32, data[8:])).reshape(-1, 2)
+                    np.array(list(map(np.uint32, data[8:]))).reshape(-1, 2)
 
         self.points3D = np.array(self.points3D)
         self.point3D_ids = np.array(self.point3D_ids)
