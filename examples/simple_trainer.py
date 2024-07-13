@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -29,6 +30,7 @@ from utils import (
 )
 
 from gsplat.rendering import rasterization
+from plyfile import PlyData, PlyElement
 
 
 @dataclass
@@ -958,6 +960,41 @@ class Runner:
         )  # [1, H, W, 3]
         return render_colors[0].cpu().numpy()
 
+    # Experimental
+    def construct_list_of_attributes(self):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(self.splats["sh0"].shape[1]*self.splats["sh0"].shape[2]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(self.splats["shN"].shape[1]*self.splats["shN"].shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(self.splats["scales"].shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(self.splats["quats"].shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+
+    # Experimental
+    @torch.no_grad()
+    def save_ply(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        xyz = self.splats["means3d"].detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc = self.splats["sh0"].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self.splats["shN"].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self.splats["opacities"].detach().unsqueeze(-1).cpu().numpy()
+        scale = self.splats["scales"].detach().cpu().numpy()
+        rotation = self.splats["quats"].detach().cpu().numpy()
+
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
 
 def main(cfg: Config):
     runner = Runner(cfg)
@@ -969,7 +1006,10 @@ def main(cfg: Config):
             runner.splats[k].data = ckpt["splats"][k]
         runner.eval(step=ckpt["step"])
         runner.render_traj(step=ckpt["step"])
+        iterations = re.split("[._]", os.path.basename(cfg.ckpt))[1]
+        runner.save_ply(f"{cfg.result_dir}\ply_files\{iterations}.ply")
     else:
+        # raise ValueError("Please provide a checkpoint to run evaluation.")
         runner.train()
 
     if not cfg.disable_viewer:
