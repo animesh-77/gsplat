@@ -1007,7 +1007,9 @@ def main(cfg: Config):
         runner.eval(step=ckpt["step"])
         runner.render_traj(step=ckpt["step"])
         iterations = re.split("[._]", os.path.basename(cfg.ckpt))[1]
-        runner.save_ply(f"{cfg.result_dir}\ply_files\{iterations}.ply")
+        ply_file_path= os.path.join(cfg.result_dir, "ply_files", f"{iterations}.ply")
+        runner.save_ply(ply_file_path)
+        print(f"PLY file saved to {ply_file_path}")
     else:
         # raise ValueError("Please provide a checkpoint to run evaluation.")
         runner.train()
