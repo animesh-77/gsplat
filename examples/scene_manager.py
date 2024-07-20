@@ -10,6 +10,9 @@ from itertools import combinations
 
 from camera import Camera
 from image import Image
+# COLMAP iamge defined uniquely by
+# name, camera_id, q, tvec other info for each image
+# point2D, point3D_ids 
 from rotation import Quaternion
 
 #-------------------------------------------------------------------------------
@@ -31,7 +34,9 @@ class SceneManager:
         self.load_colmap_project_file(image_path=image_path)
 
         self.cameras = OrderedDict()
+        # self.cameras = {camera_id: Camera}
         self.images = OrderedDict()
+        # self.images = {image_id: Image}
         self.name_to_image_id = dict()
 
         self.last_camera_id = 0

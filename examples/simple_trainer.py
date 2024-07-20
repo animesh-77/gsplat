@@ -1,3 +1,4 @@
+from datetime import datetime
 import json
 import math
 import os
@@ -35,6 +36,7 @@ from plyfile import PlyData, PlyElement
 
 @dataclass
 class Config:
+    # dataclass removes the need to add the __init__ method
     # Disable viewer
     disable_viewer: bool = False
     # Path to the .pt file. If provide, it will skip training and render a video
@@ -43,10 +45,12 @@ class Config:
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
+    # for 1 it uses images/ for 2 it uses images_2/ , for 4 it uses images_4/
     data_factor: int = 4
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
+    # So in 9 images :- 8 images for training and 1 image for testing
     test_every: int = 8
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
@@ -59,6 +63,7 @@ class Config:
     # Batch size for training. Learning rates are scaled automatically
     batch_size: int = 1
     # A global factor to scale the number of training steps
+    # used as factor in adjust_steps()
     steps_scaler: float = 1.0
 
     # Number of training steps
@@ -146,7 +151,7 @@ class Config:
     # Dump information to tensorboard every this steps
     tb_every: int = 100
     # Save training images to tensorboard
-    tb_save_image: bool = False
+    tb_save_image: bool = True
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -181,9 +186,10 @@ def create_splats_with_optimizers(
         rgbs = torch.rand((init_num_pts, 3))
     else:
         raise ValueError("Please specify a correct init_type: sfm or random")
-
+    # points and rgb are torch tensors
     N = points.shape[0]
     # Initialize the GS size to be the average dist of the 3 nearest neighbors
+    # using sklearn for knn
     dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
     dist_avg = torch.sqrt(dist2_avg)
     scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
@@ -212,6 +218,7 @@ def create_splats_with_optimizers(
         params.append(("colors", torch.nn.Parameter(colors), 2.5e-3))
 
     splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
+    # parameters are stored in a dictionary
     # Scale learning rate based on batch size, reference:
     # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
     # Note that this would not make the training exactly equivalent, see
@@ -224,11 +231,17 @@ def create_splats_with_optimizers(
         )
         for name, _, lr in params
     ]
+    # optimizers is a list of optimizers for each parameter
+    # either all will be Adam or all will be SparseAdam
     return splats, optimizers
 
 
 class Runner:
-    """Engine for training and testing."""
+    """Engine for training and testing.
+    This is the class that has the attricutes
+    - splats:
+    - optimizers:
+    """
 
     def __init__(self, cfg: Config) -> None:
         set_random_seed(42)
@@ -248,7 +261,10 @@ class Runner:
         os.makedirs(self.render_dir, exist_ok=True)
 
         # Tensorboard
-        self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
+        now = datetime.now()
+        current_time = f"{now.strftime('%b')}-{now.day}__{now.hour:02d}_{now.minute:02d}_{now.second:02d}"
+        log_dir = f"{cfg.result_dir}/tb/{current_time}/"
+        self.writer = SummaryWriter(log_dir= log_dir)
 
         # Load data: Training data should contain initial points and colors.
         self.parser = Parser(
@@ -257,18 +273,29 @@ class Runner:
             normalize=True,
             test_every=cfg.test_every,
         )
+        # Parser is a COLMAP parser that reads the images and the 3D points from the COLMAP model
+        # It has attributes like:
+        # - self.cameras: 
+        # - self.images:
+        # - self.points3D:
+        # - self.points3D_ids:
+        # - self.points3D_id_to_images:
         self.trainset = Dataset(
             self.parser,
-            split="train",
+            split="train", # split is either "train" or "val" 
             patch_size=cfg.patch_size,
             load_depths=cfg.depth_loss,
         )
         self.valset = Dataset(self.parser, split="val")
+        # here "val" so remaining images are used for testing
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
         # Model
         feature_dim = 32 if cfg.app_opt else None
+        # actual splats and optimizers 
+        # different optimizers for each parameter
+        # self.splats is a dictionary
         self.splats, self.optimizers = create_splats_with_optimizers(
             self.parser,
             init_type=cfg.init_type,
@@ -392,6 +419,13 @@ class Runner:
         return render_colors, render_alphas, info
 
     def train(self):
+        """
+        self is an instance of class Runner
+        it ahs attributes like:
+        - self.splats
+          - means3d
+          - scales
+        """
         cfg = self.cfg
         device = self.device
 
@@ -429,6 +463,7 @@ class Runner:
         # Training loop.
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
+        # custom progress bar which will be updated manually
         for step in pbar:
             if not cfg.disable_viewer:
                 while self.viewer.state.status == "paused":
@@ -525,10 +560,11 @@ class Runner:
             pbar.set_description(desc)
 
             if cfg.tb_every > 0 and step % cfg.tb_every == 0:
+                # tensorboard writer here
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 self.writer.add_scalar("train/loss", loss.item(), step)
-                self.writer.add_scalar("train/l1loss", l1loss.item(), step)
-                self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
+                self.writer.add_scalar("train/L1_loss", l1loss.item(), step)
+                self.writer.add_scalar("train/SSIM_loss", ssimloss.item(), step)
                 self.writer.add_scalar(
                     "train/num_GS", len(self.splats["means3d"]), step
                 )
@@ -649,6 +685,7 @@ class Runner:
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1:
+                # run eavlulation on eval_steps and just before last step
                 self.eval(step)
                 self.render_traj(step)
 
@@ -873,9 +910,9 @@ class Runner:
         )
         # save stats as json
         stats = {
-            "psnr": psnr.item(),
-            "ssim": ssim.item(),
-            "lpips": lpips.item(),
+            "PSNR": psnr.item(),
+            "SSIM": ssim.item(),
+            "LPIPS": lpips.item(),
             "ellipse_time": ellipse_time,
             "num_GS": len(self.splats["means3d"]),
         }
@@ -997,10 +1034,11 @@ class Runner:
         PlyData([el]).write(path)
 
 def main(cfg: Config):
+    # cfg is an instance of class Config
     runner = Runner(cfg)
 
     if cfg.ckpt is not None:
-        # run eval only
+        # run eval only no training done
         ckpt = torch.load(cfg.ckpt, map_location=runner.device)
         for k in runner.splats.keys():
             runner.splats[k].data = ckpt["splats"][k]
@@ -1020,6 +1058,9 @@ def main(cfg: Config):
 
 
 if __name__ == "__main__":
+    # tyro.cli removes the need to manually add argparse 
     cfg = tyro.cli(Config)
-    cfg.adjust_steps(cfg.steps_scaler)
+    # cfg is an instance of class Config with 1 function
+    # scales some of the arguments
+    cfg.adjust_steps(factor= cfg.steps_scaler)
     main(cfg)
