@@ -40,6 +40,7 @@ class Parser:
         self.normalize = normalize
         self.test_every = test_every
 
+        # searches for a sparse/0 folder where the cameras.bin , images.bin and points3D.bin are stored
         colmap_dir = os.path.join(data_dir, "sparse/0/")
         if not os.path.exists(colmap_dir):
             colmap_dir = os.path.join(data_dir, "sparse")
@@ -48,6 +49,7 @@ class Parser:
         ), f"COLMAP directory {colmap_dir} does not exist."
 
         manager = SceneManager(colmap_dir)
+        # SceneManager has attributes like cameras, images, points3D, points3D_ids etc
         manager.load_cameras()
         manager.load_images()
         manager.load_points3D()
@@ -124,6 +126,9 @@ class Parser:
         # Image names from COLMAP. No need for permuting the poses according to
         # image names anymore.
         image_names = [imdata[k].name for k in imdata]
+        # Remove the images/ prefix if it is there in all image names
+        if all([n.startswith("images/") for n in image_names]):
+            image_names = [n[len("images/") :] for n in image_names]
 
         # Previous Nerf results were generated with images sorted by filename,
         # ensure metrics are reported on the same test set.
@@ -147,6 +152,11 @@ class Parser:
         # so we need to map between the two sorted lists of files.
         colmap_files = sorted(_get_rel_paths(colmap_image_dir))
         image_files = sorted(_get_rel_paths(image_dir))
+        try:
+            image_files.remove("Thumbs.db")
+            colmap_files.remove("Thumbs.db")
+        except ValueError:
+            pass
         colmap_to_image = dict(zip(colmap_files, image_files))
         image_paths = [os.path.join(image_dir, colmap_to_image[f]) for f in image_names]
 
@@ -226,7 +236,10 @@ class Parser:
 
 
 class Dataset:
-    """A simple dataset class."""
+    """A simple dataset class.
+    https://pytorch.org/tutorials/beginner/basics/data_tutorial.html#creating-a-custom-dataset-for-your-files
+    It must implement 3 functions __init__, __len__, and __getitem__
+    """
 
     def __init__(
         self,
@@ -235,20 +248,41 @@ class Dataset:
         patch_size: Optional[int] = None,
         load_depths: bool = False,
     ):
+        """
+        The __init__ function is run once when instantiating the Dataset object
+        """
         self.parser = parser
         self.split = split
         self.patch_size = patch_size
         self.load_depths = load_depths
         indices = np.arange(len(self.parser.image_names))
+        # indices of images to use
         if split == "train":
+            # in default self.parser.test_every = 8, 
+            # so for 9 images 8 will be training and 1 for testing
             self.indices = indices[indices % self.parser.test_every != 0]
         else:
             self.indices = indices[indices % self.parser.test_every == 0]
 
     def __len__(self):
+        """
+        The __len__ function returns the number of samples in our dataset
+        or specifically the list of indices of images being used
+        """
         return len(self.indices)
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
+        """
+        The __getitem__ function loads and returns a sample from the dataset at the given index idx
+        here the returned sample is a dictionary
+        --K:
+        --camtoworld:
+        --image:
+        --image_id:
+        and additonally if load_depths is True. In default case, it is False
+        --points:
+        --depths:
+        """
         index = self.indices[item]
         image = imageio.imread(self.parser.image_paths[index])[..., :3]
         camera_id = self.parser.camera_ids[index]
@@ -283,6 +317,7 @@ class Dataset:
         }
 
         if self.load_depths:
+            # in default case, self.load_depths is False
             # projected points to image plane to get depths
             worldtocams = np.linalg.inv(camtoworlds)
             image_name = self.parser.image_names[index]
