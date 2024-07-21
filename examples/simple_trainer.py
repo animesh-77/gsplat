@@ -855,7 +855,9 @@ class Runner:
 
     @torch.no_grad()
     def eval(self, step: int):
-        """Entry for evaluation."""
+        """Entry for evaluation.
+        Render image for each evaluation cameras
+        and calculate PSNR, SSIM, LPIPS"""
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
@@ -869,7 +871,9 @@ class Runner:
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
+            # original image
             height, width = pixels.shape[1:3]
+            image_id= data["image_id"]
 
             torch.cuda.synchronize()
             tic = time.time()
@@ -883,13 +887,15 @@ class Runner:
                 far_plane=cfg.far_plane,
             )  # [1, H, W, 3]
             colors = torch.clamp(colors, 0.0, 1.0)
+            # colors is the rendered image
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
 
             # write images
             canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
+            # left side is the original image and right side is the rendered image
             imageio.imwrite(
-                f"{self.render_dir}/val_{i:04d}.png", (canvas * 255).astype(np.uint8)
+                f"{self.render_dir}/val_{i:04d}_cam_{image_id}.png", (canvas * 255).astype(np.uint8)
             )
 
             pixels = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
@@ -903,6 +909,7 @@ class Runner:
         psnr = torch.stack(metrics["psnr"]).mean()
         ssim = torch.stack(metrics["ssim"]).mean()
         lpips = torch.stack(metrics["lpips"]).mean()
+        # report the mean value over all validation images
         print(
             f"PSNR: {psnr.item():.3f}, SSIM: {ssim.item():.4f}, LPIPS: {lpips.item():.3f} "
             f"Time: {ellipse_time:.3f}s/image "

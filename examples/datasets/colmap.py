@@ -261,7 +261,11 @@ class Dataset:
             # in default self.parser.test_every = 8, 
             # so for 9 images 8 will be training and 1 for testing
             self.indices = indices[indices % self.parser.test_every != 0]
+            # if self.parser.test_every = 8
+            # X 1 2 3 4 5 6 7 X 9 10 11 12 13 14 15 X
         else:
+            # if self.parser.test_every = 8
+            # 0 X X X X X X X 8 X X X X X X X 16
             self.indices = indices[indices % self.parser.test_every == 0]
 
     def __len__(self):
