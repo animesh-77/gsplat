@@ -151,7 +151,7 @@ class Config:
     # Dump information to tensorboard every this steps
     tb_every: int = 100
     # Save training images to tensorboard
-    tb_save_image: bool = True
+    tb_save_image: bool = False
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -873,7 +873,7 @@ class Runner:
             pixels = data["image"].to(device) / 255.0
             # original image
             height, width = pixels.shape[1:3]
-            image_id= data["image_id"]
+            image_id= self.valset.indices[i]
 
             torch.cuda.synchronize()
             tic = time.time()
@@ -895,7 +895,7 @@ class Runner:
             canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
             # left side is the original image and right side is the rendered image
             imageio.imwrite(
-                f"{self.render_dir}/val_{i:04d}_cam_{image_id}.png", (canvas * 255).astype(np.uint8)
+                f"{self.render_dir}/val_{step}_cam_{image_id}.png", (canvas * 255).astype(np.uint8)
             )
 
             pixels = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
