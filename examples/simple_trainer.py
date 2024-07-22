@@ -179,6 +179,7 @@ class Config:
             config = json.load(f)
         cfg= Config(**config)
         cfg.ckpt= self.ckpt
+        cfg.resume= True
         return cfg
 
 def create_splats_with_optimizers(
@@ -252,9 +253,10 @@ def create_splats_with_optimizers(
     # either all will be Adam or all will be SparseAdam
     return splats, optimizers
 
-def create_optimeizers_only(
+def create_optimizers_only(
     splats: torch.nn.ParameterDict,
-    params: List[Tuple[str, torch.nn.Parameter, float]],
+    # params: List[Tuple[str, torch.nn.Parameter, float]],
+    scene_scale: float = 1.0,
     batch_size: int = 1,
     sparse_grad: bool = False,
     device: str = "cuda",
@@ -263,6 +265,22 @@ def create_optimeizers_only(
     # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
     # Note that this would not make the training exactly equivalent, see
     # https://arxiv.org/pdf/2402.18824v1
+
+    lr_map= {
+        "means3d": 1.6e-4* scene_scale,
+        "scales": 5e-3,
+        "quats": 1e-3,
+        "opacities": 5e-2,
+        "sh0": 2.5e-3,
+        "shN": 2.5e-3 / 20,
+        "features": 2.5e-3,
+        "colors": 2.5e-3,
+    }
+    params= []
+    for name, value in splats.items():
+        params.append((name, value, lr_map[name]))
+
+
     optimizers = [
         (torch.optim.SparseAdam if sparse_grad else torch.optim.Adam)(
             [{"params": splats[name].to(device), "lr": lr * math.sqrt(batch_size), "name": name}],
@@ -354,24 +372,16 @@ class Runner:
                 device=self.device,
             )
         else:
+            # resume is True, we are resuming from a checkpoint
             # we are resuming from a checkpoint
             # load the checkpoint
-            ckpt = torch.load(cfg.ckpt)
-            self.splats = torch.nn.ParameterDict(ckpt["splats"]).to(self.device)
-
+            print("Resuming from checkpoint:", cfg.ckpt)
             ckpt = torch.load(cfg.ckpt, map_location="cuda")
-            for k in runner.splats.keys():
-                runner.splats[k].data = ckpt["splats"][k]
-            runner.eval(step=ckpt["step"])
-
-
+            self.splats = torch.nn.ParameterDict(ckpt["splats"]).to(self.device)
             # create optimizers for the splats
-            self.optimizers = create_optimeizers_only(
-                self.splats,
-                [
-                    (n, v, 1.6e-4 * self.scene_scale)
-                    for n, v in self.splats.items()
-                ],
+            self.optimizers = create_optimizers_only(
+                splats=self.splats,
+                scene_scale=self.scene_scale,
                 batch_size=cfg.batch_size,
                 sparse_grad=cfg.sparse_grad,
                 device=self.device,
@@ -1151,7 +1161,6 @@ def main(cfg: Config):
         ckpt = torch.load(cfg.ckpt, map_location= "cuda")
         runner = Runner(cfg)
         for k in runner.splats.keys():
-            print(k, runner.splats[k].data.shape, "####", ckpt["splats"][k].shape)
             runner.splats[k].data = ckpt["splats"][k]
         
         runner.train()
