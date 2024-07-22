@@ -42,6 +42,10 @@ class Config:
     # Path to the .pt file. If provide, it will skip training and render a video
     ckpt: Optional[str] = None
 
+    # Resume training from previous checkpoint
+    resume: bool = False
+    # which run are we on
+    run: int = 0
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
@@ -163,6 +167,19 @@ class Config:
         self.reset_every = int(self.reset_every * factor)
         self.refine_every = int(self.refine_every * factor)
 
+    def read_json_and_make_config(self) -> "Config":
+        """
+        Read the json file and make a config object
+        which .json to read is specified by which ckeckpoint is being loaded as a .pt file
+        """
+        step= re.split("[_.]", self.ckpt)[-2]
+        runn_dir= os.path.dirname(os.path.dirname(self.ckpt))
+        config_file_json= os.path.join(runn_dir, "config_files", f"save_{step}.json")
+        with open(config_file_json, 'r') as f:
+            config = json.load(f)
+        cfg= Config(**config)
+        cfg.ckpt= self.ckpt
+        return cfg
 
 def create_splats_with_optimizers(
     parser: Parser,
@@ -235,6 +252,26 @@ def create_splats_with_optimizers(
     # either all will be Adam or all will be SparseAdam
     return splats, optimizers
 
+def create_optimeizers_only(
+    splats: torch.nn.ParameterDict,
+    params: List[Tuple[str, torch.nn.Parameter, float]],
+    batch_size: int = 1,
+    sparse_grad: bool = False,
+    device: str = "cuda",
+) -> torch.optim.Optimizer:
+    # Scale learning rate based on batch size, reference:
+    # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
+    # Note that this would not make the training exactly equivalent, see
+    # https://arxiv.org/pdf/2402.18824v1
+    optimizers = [
+        (torch.optim.SparseAdam if sparse_grad else torch.optim.Adam)(
+            [{"params": splats[name].to(device), "lr": lr * math.sqrt(batch_size), "name": name}],
+            eps=1e-15 / math.sqrt(batch_size),
+            betas=(1 - batch_size * (1 - 0.9), 1 - batch_size * (1 - 0.999)),
+        )
+        for name, _, lr in params
+    ]
+    return optimizers
 
 class Runner:
     """Engine for training and testing.
@@ -253,17 +290,21 @@ class Runner:
         os.makedirs(cfg.result_dir, exist_ok=True)
 
         # Setup output directories.
-        self.ckpt_dir = f"{cfg.result_dir}/ckpts"
+        self.ckpt_dir = f"{cfg.result_dir}/run{cfg.run}/ckpts"
         os.makedirs(self.ckpt_dir, exist_ok=True)
-        self.stats_dir = f"{cfg.result_dir}/stats"
+        self.stats_dir = f"{cfg.result_dir}/run{cfg.run}/stats"
         os.makedirs(self.stats_dir, exist_ok=True)
-        self.render_dir = f"{cfg.result_dir}/renders"
+        self.render_dir = f"{cfg.result_dir}/run{cfg.run}/renders"
         os.makedirs(self.render_dir, exist_ok=True)
 
+        self.ply_dir = f"{cfg.result_dir}/run{cfg.run}/ply_files"
+        os.makedirs(self.ply_dir, exist_ok=True)
+        self.config_dir = f"{cfg.result_dir}/run{cfg.run}/config_files"
+        os.makedirs(self.config_dir, exist_ok=True)
         # Tensorboard
         now = datetime.now()
         current_time = f"{now.strftime('%b')}-{now.day}__{now.hour:02d}_{now.minute:02d}_{now.second:02d}"
-        log_dir = f"{cfg.result_dir}/tb/{current_time}/"
+        log_dir = f"{cfg.result_dir}/run{cfg.run}/tb/{current_time}/"
         self.writer = SummaryWriter(log_dir= log_dir)
 
         # Load data: Training data should contain initial points and colors.
@@ -296,20 +337,46 @@ class Runner:
         # actual splats and optimizers 
         # different optimizers for each parameter
         # self.splats is a dictionary
-        self.splats, self.optimizers = create_splats_with_optimizers(
-            self.parser,
-            init_type=cfg.init_type,
-            init_num_pts=cfg.init_num_pts,
-            init_extent=cfg.init_extent,
-            init_opacity=cfg.init_opa,
-            init_scale=cfg.init_scale,
-            scene_scale=self.scene_scale,
-            sh_degree=cfg.sh_degree,
-            sparse_grad=cfg.sparse_grad,
-            batch_size=cfg.batch_size,
-            feature_dim=feature_dim,
-            device=self.device,
-        )
+        if cfg.resume is False:
+            # we are starting from scratch run0
+            self.splats, self.optimizers = create_splats_with_optimizers(
+                self.parser,
+                init_type=cfg.init_type,
+                init_num_pts=cfg.init_num_pts,
+                init_extent=cfg.init_extent,
+                init_opacity=cfg.init_opa,
+                init_scale=cfg.init_scale,
+                scene_scale=self.scene_scale,
+                sh_degree=cfg.sh_degree,
+                sparse_grad=cfg.sparse_grad,
+                batch_size=cfg.batch_size,
+                feature_dim=feature_dim,
+                device=self.device,
+            )
+        else:
+            # we are resuming from a checkpoint
+            # load the checkpoint
+            ckpt = torch.load(cfg.ckpt)
+            self.splats = torch.nn.ParameterDict(ckpt["splats"]).to(self.device)
+
+            ckpt = torch.load(cfg.ckpt, map_location="cuda")
+            for k in runner.splats.keys():
+                runner.splats[k].data = ckpt["splats"][k]
+            runner.eval(step=ckpt["step"])
+
+
+            # create optimizers for the splats
+            self.optimizers = create_optimeizers_only(
+                self.splats,
+                [
+                    (n, v, 1.6e-4 * self.scene_scale)
+                    for n, v in self.splats.items()
+                ],
+                batch_size=cfg.batch_size,
+                sparse_grad=cfg.sparse_grad,
+                device=self.device,
+            )
+
         print("Model initialized. Number of GS:", len(self.splats["means3d"]))
 
         self.pose_optimizers = []
@@ -429,9 +496,11 @@ class Runner:
         cfg = self.cfg
         device = self.device
 
-        # Dump cfg.
-        with open(f"{cfg.result_dir}/cfg.json", "w") as f:
-            json.dump(vars(cfg), f)
+        # Dump cfg
+        # let this be. This json serves as a record of the config used for run0
+        if self.cfg.run == 0:
+            with open(f"{cfg.result_dir}/cfg.json", "w") as f:
+                json.dump(vars(cfg), f)
 
         max_steps = cfg.max_steps
         init_step = 0
@@ -664,7 +733,8 @@ class Runner:
             for scheduler in schedulers:
                 scheduler.step()
 
-            # save checkpoint
+            # at save steps we save the model, config files
+            # we can later continue training from any of these checkpoints
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 stats = {
@@ -673,7 +743,7 @@ class Runner:
                     "num_GS": len(self.splats["means3d"]),
                 }
                 print("Step: ", step, stats)
-                with open(f"{self.stats_dir}/train_step{step:04d}.json", "w") as f:
+                with open(f"{self.stats_dir}/save_step_{step}.json", "w") as f:
                     json.dump(stats, f)
                 torch.save(
                     {
@@ -683,11 +753,21 @@ class Runner:
                     f"{self.ckpt_dir}/ckpt_{step}.pt",
                 )
 
-            # eval the full set
+                # save the ply file only on save steps not on eval steps
+                # on eval steps we only want to evaluate the model
+
+                self.save_ply(step)
+                print(f"PLY file saved to {self.ply_dir}/save_{step}.ply")
+                # save the config file
+                
+                self.save_config(step)
+
+            # evaluation done on the evaluation cameras
+            # for all eval steps and last step
             if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1:
                 # run eavlulation on eval_steps and just before last step
                 self.eval(step)
-                self.render_traj(step)
+                # self.render_traj(step)
 
             if not cfg.disable_viewer:
                 self.viewer.lock.release()
@@ -855,9 +935,11 @@ class Runner:
 
     @torch.no_grad()
     def eval(self, step: int):
-        """Entry for evaluation.
+        """
+        Entry for evaluation.
         Render image for each evaluation cameras
-        and calculate PSNR, SSIM, LPIPS"""
+        and calculate PSNR, SSIM, LPIPS
+        """
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
@@ -923,12 +1005,13 @@ class Runner:
             "ellipse_time": ellipse_time,
             "num_GS": len(self.splats["means3d"]),
         }
-        with open(f"{self.stats_dir}/val_step{step:04d}.json", "w") as f:
+        with open(f"{self.stats_dir}/eval_step_{step}.json", "w") as f:
             json.dump(stats, f)
         # save stats to tensorboard
         for k, v in stats.items():
             self.writer.add_scalar(f"val/{k}", v, step)
         self.writer.flush()
+
 
     @torch.no_grad()
     def render_traj(self, step: int):
@@ -975,7 +1058,7 @@ class Runner:
             canvas_all.append(canvas)
 
         # save to video
-        video_dir = f"{cfg.result_dir}/videos"
+        video_dir = f"{cfg.result_dir}/run{cfg.run}/videos"
         os.makedirs(video_dir, exist_ok=True)
         writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=30)
         for canvas in canvas_all:
@@ -1021,8 +1104,12 @@ class Runner:
 
     # Experimental
     @torch.no_grad()
-    def save_ply(self, path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    def save_ply(self, steps: int):
+        """
+        Model saved as .ply file on save steps
+        self.ply_dir is the path to the folder we want to save the ply files
+        """
+        os.makedirs(os.path.dirname(self.ply_dir), exist_ok=True)
 
         xyz = self.splats["means3d"].detach().cpu().numpy()
         normals = np.zeros_like(xyz)
@@ -1038,26 +1125,56 @@ class Runner:
         attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
-        PlyData([el]).write(path)
+        ply_file_path = os.path.join(self.ply_dir, f"step_{steps}.ply")
+        PlyData([el]).write(ply_file_path)
+
+    def save_config(self, step: int):
+        """
+        save the config files for this run so they can be used for the next run
+        only done at save steps, last iteration is a save step
+        """
+        config_file_path = os.path.join(self.config_dir, f"save_{step}.json")
+        os.makedirs(os.path.dirname(config_file_path), exist_ok=True)
+        json_str = json.dumps(self.cfg.__dict__, indent=2)
+        with open(config_file_path, 'w') as f:
+            f.write(json_str)
 
 def main(cfg: Config):
     # cfg is an instance of class Config
-    runner = Runner(cfg)
+    
 
-    if cfg.ckpt is not None:
-        # run eval only no training done
-        ckpt = torch.load(cfg.ckpt, map_location=runner.device)
+    if (cfg.ckpt is not None) and (cfg.resume is True):
+        # resume training from the from some checkpoint
+        # a new run_id folder is creataed where all the results will be saved
+        cfg= cfg.read_json_and_make_config()
+        cfg.run += 1
+        ckpt = torch.load(cfg.ckpt, map_location= "cuda")
+        runner = Runner(cfg)
         for k in runner.splats.keys():
+            print(k, runner.splats[k].data.shape, "####", ckpt["splats"][k].shape)
             runner.splats[k].data = ckpt["splats"][k]
-        runner.eval(step=ckpt["step"])
-        runner.render_traj(step=ckpt["step"])
-        iterations = re.split("[._]", os.path.basename(cfg.ckpt))[1]
-        ply_file_path= os.path.join(cfg.result_dir, "ply_files", f"{iterations}.ply")
-        runner.save_ply(ply_file_path)
-        print(f"PLY file saved to {ply_file_path}")
-    else:
-        # raise ValueError("Please provide a checkpoint to run evaluation.")
+        
         runner.train()
+
+    else:
+        runner = Runner(cfg)
+        if (cfg.ckpt is not None) and (cfg.resume_training is False):
+            # run evaluation only and no training done
+            # no .ply or config files .json files are saved
+            pass
+            # runner.render_traj(step=ckpt["step"])
+            # save the ply file
+            # iterations = re.split("[._]", os.path.basename(cfg.ckpt))[1]
+            # ply_file_path= os.path.join(cfg.result_dir, "ply_files", f"{iterations}.ply")
+            # runner.save_ply(ply_file_path)
+            # print(f"PLY file saved to {ply_file_path}")
+            # save the config file
+            # config_file_path= os.path.join(cfg.result_dir, "config_files", f"{iterations}.json")
+            # runner.save_config(config_file_path)
+
+        else:
+            # run full training loop
+            runner.train()
 
     if not cfg.disable_viewer:
         print("Viewer running... Ctrl+C to exit.")
