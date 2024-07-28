@@ -223,9 +223,12 @@ def create_splats_with_optimizers(
     ]
 
     if feature_dim is None:
+        # by default feature_dim is None
         # color is SH coefficients.
-        colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))  # [N, K, 3]
-        colors[:, 0, :] = rgb_to_sh(rgbs)
+        # by default sh_degree is 3
+        # so k= 16
+        colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))  # [N, 16, 3]
+        colors[:, 0, :] = rgb_to_sh(rgbs) # shape of rgbs is [N, 3]
         params.append(("sh0", torch.nn.Parameter(colors[:, :1, :]), 2.5e-3))
         params.append(("shN", torch.nn.Parameter(colors[:, 1:, :]), 2.5e-3 / 20))
     else:
@@ -352,6 +355,7 @@ class Runner:
 
         # Model
         feature_dim = 32 if cfg.app_opt else None
+        # by default cfg.app_opt is False so feature_dim is None
         # actual splats and optimizers 
         # different optimizers for each parameter
         # self.splats is a dictionary
@@ -365,7 +369,7 @@ class Runner:
                 init_opacity=cfg.init_opa,
                 init_scale=cfg.init_scale,
                 scene_scale=self.scene_scale,
-                sh_degree=cfg.sh_degree,
+                sh_degree=cfg.sh_degree, # by default 3
                 sparse_grad=cfg.sparse_grad,
                 batch_size=cfg.batch_size,
                 feature_dim=feature_dim,
