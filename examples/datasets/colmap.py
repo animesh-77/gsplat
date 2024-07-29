@@ -33,13 +33,17 @@ class Parser:
         data_dir: str,
         factor: int = 1,
         normalize: bool = False,
-        test_every: int = 8,
+        test_every: Optional[int] = None,
+        test_cam_ids: Optional[List[int]] = None,
+        train_cam_ids: Optional[List[int]] = None, 
     ):
         self.data_dir = data_dir
         self.factor = factor
         self.normalize = normalize
         self.test_every = test_every
-
+        self.test_cam_ids = test_cam_ids
+        self.train_cam_ids = train_cam_ids
+        
         # searches for a sparse/0 folder where the cameras.bin , images.bin and points3D.bin are stored
         colmap_dir = os.path.join(data_dir, "sparse/0/")
         if not os.path.exists(colmap_dir):
@@ -258,15 +262,22 @@ class Dataset:
         indices = np.arange(len(self.parser.image_names))
         # indices of images to use
         if split == "train":
-            # in default self.parser.test_every = 8, 
-            # so for 9 images 8 will be training and 1 for testing
-            self.indices = indices[indices % self.parser.test_every != 0]
-            # if self.parser.test_every = 8
-            # X 1 2 3 4 5 6 7 X 9 10 11 12 13 14 15 X
+            if self.parser.test_every is not None:
+                # in default self.parser.test_every = 8, 
+                # so for 9 images 8 will be training and 1 for testing
+                self.indices = indices[indices % self.parser.test_every != 0]
+                # if self.parser.test_every = 8
+                # X 1 2 3 4 5 6 7 X 9 10 11 12 13 14 15 X
+            else:
+                self.indices = self.parser.test_cam_ids
+                
         else:
             # if self.parser.test_every = 8
             # 0 X X X X X X X 8 X X X X X X X 16
-            self.indices = indices[indices % self.parser.test_every == 0]
+            if self.parser.test_every is not None:
+                self.indices = indices[indices % self.parser.test_every == 0]
+            else:
+                self.indices = self.parser.train_cam_ids
 
     def __len__(self):
         """

@@ -55,7 +55,11 @@ class Config:
     result_dir: str = "results/garden"
     # Every N images there is a test image
     # So in 9 images :- 8 images for training and 1 image for testing
-    test_every: int = 8
+    test_every: Optional[int] = None
+    # add feature to directly call test cameras by index
+    test_cam_ids: Optional[List[int]] = field(default_factory=lambda: [2, 15, 30 ,45])
+    # add feature to directly call train cameras by index
+    train_cam_ids: Optional[List[int]] = field(default_factory=lambda: [1, 50])
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -174,7 +178,7 @@ class Config:
         """
         step= re.split("[_.]", self.ckpt)[-2]
         runn_dir= os.path.dirname(os.path.dirname(self.ckpt))
-        config_file_json= os.path.join(runn_dir, "config_files", f"save_{step}.json")
+        config_file_json= os.path.join(runn_dir, "next_run", f"save_{step}.json")
         with open(config_file_json, 'r') as f:
             config = json.load(f)
         cfg= Config(**config)
@@ -334,6 +338,8 @@ class Runner:
             factor=cfg.data_factor,
             normalize=True,
             test_every=cfg.test_every,
+            test_cam_ids=cfg.test_cam_ids,
+            train_cam_ids=cfg.train_cam_ids,
         )
         # Parser is a COLMAP parser that reads the images and the 3D points from the COLMAP model
         # It has attributes like:
@@ -513,8 +519,13 @@ class Runner:
         # Dump cfg
         # let this be. This json serves as a record of the config used for run0
         if self.cfg.run == 0:
+            dict_to_save = self.cfg.__dict__
+            dict_to_save["train_images"]= [self.parser.image_names[i] for i in self.parser.train_cam_ids]
+            dict_to_save["test_images"]= [self.parser.image_names[i] for i in self.parser.test_cam_ids]
             with open(f"{cfg.result_dir}/cfg.json", "w") as f:
-                json.dump(vars(cfg), f)
+                json.dump(dict_to_save, f, indent=4)
+            self.save_img_list()
+
 
         max_steps = cfg.max_steps
         init_step = 0
@@ -773,7 +784,7 @@ class Runner:
                 self.save_ply(step)
                 print(f"PLY file saved to {self.ply_dir}/save_{step}.ply")
                 # save the config file
-                
+            if step == max_steps - 1: # last step
                 self.save_config(step)
 
             # evaluation done on the evaluation cameras
@@ -1145,14 +1156,26 @@ class Runner:
     def save_config(self, step: int):
         """
         save the config files for this run so they can be used for the next run
-        only done at save steps, last iteration is a save step
+        only done at last iteration
+        an additonal key is added to the config file with the list of test images and train images
+        this key is deleted when resuming training
         """
         config_file_path = os.path.join(self.config_dir, f"save_{step}.json")
         os.makedirs(os.path.dirname(config_file_path), exist_ok=True)
-        json_str = json.dumps(self.cfg.__dict__, indent=2)
+        dict_to_save= self.cfg.__dict__
+        # in this dict add a key with list of image names
+        dict_to_save["train_images"]= [self.parser.image_names[i] for i in self.parser.train_cam_ids]
+        dict_to_save["test_images"]= [self.parser.image_names[i] for i in self.parser.test_cam_ids]
         with open(config_file_path, 'w') as f:
-            f.write(json_str)
-
+            json.dump(dict_to_save, f, indent=4)
+    def save_img_list(self):
+        """
+        save the list of all images and their index only once
+        """
+        img_index_dict= {key: value for key, value in enumerate(self.parser.image_names)}
+        with open(f"{self.cfg.result_dir}/img_index.json", "w") as f:
+            json.dump(img_index_dict, f, indent=4)
+        
 def main(cfg: Config):
     # cfg is an instance of class Config
     
@@ -1161,7 +1184,7 @@ def main(cfg: Config):
         # resume training from the from some checkpoint
         # a new run_id folder is creataed where all the results will be saved
         cfg= cfg.read_json_and_make_config()
-        cfg.run += 1
+        # cfg.run += 1 # no need to increase since it is done in bash script
         ckpt = torch.load(cfg.ckpt, map_location= "cuda")
         runner = Runner(cfg)
         for k in runner.splats.keys():
@@ -1175,24 +1198,26 @@ def main(cfg: Config):
             # run evaluation only and no training done
             # no .ply or config files .json files are saved
             pass
-            # runner.render_traj(step=ckpt["step"])
+            runner.render_traj(step=ckpt["step"])
             # save the ply file
-            # iterations = re.split("[._]", os.path.basename(cfg.ckpt))[1]
-            # ply_file_path= os.path.join(cfg.result_dir, "ply_files", f"{iterations}.ply")
-            # runner.save_ply(ply_file_path)
-            # print(f"PLY file saved to {ply_file_path}")
+            iterations = re.split("[._]", os.path.basename(cfg.ckpt))[1]
+            ply_file_path= os.path.join(cfg.result_dir, "ply_files", f"{iterations}.ply")
+            runner.save_ply(ply_file_path)
+            print(f"PLY file saved to {ply_file_path}")
             # save the config file
-            # config_file_path= os.path.join(cfg.result_dir, "config_files", f"{iterations}.json")
-            # runner.save_config(config_file_path)
+            config_file_path= os.path.join(cfg.result_dir, "config_files", f"{iterations}.json")
+            runner.save_config(config_file_path)
 
         else:
             # run full training loop
             runner.train()
 
     if not cfg.disable_viewer:
-        print("Viewer running... Ctrl+C to exit.")
-        time.sleep(1000000)
-
+        try:
+            print("Viewer running... Ctrl+C to exit.")
+            time.sleep(1000000)
+        except KeyboardInterrupt:
+            print("Viewer stopped.")
 
 if __name__ == "__main__":
     # tyro.cli removes the need to manually add argparse 
