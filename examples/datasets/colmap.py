@@ -196,6 +196,7 @@ class Parser:
 
         self.image_names = image_names  # List[str], (num_images,)
         self.image_paths = image_paths  # List[str], (num_images,)
+        self.masks_paths = [img_path.replace("images", "masks") for img_path in image_paths]
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
@@ -300,6 +301,7 @@ class Dataset:
         """
         index = self.indices[item]
         image = imageio.imread(self.parser.image_paths[index])[..., :3]
+        mask = imageio.imread(self.parser.masks_paths[index])  # Load the mask
         camera_id = self.parser.camera_ids[index]
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]
@@ -312,8 +314,11 @@ class Dataset:
                 self.parser.mapy_dict[camera_id],
             )
             image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
+            mask = cv2.remap(mask, mapx, mapy, cv2.INTER_LINEAR)  # Undistort the mask
             x, y, w, h = self.parser.roi_undist_dict[camera_id]
             image = image[y : y + h, x : x + w]
+            mask = mask[y : y + h, x : x + w]  # Crop the mask
+            raise NotImplementedError
 
         if self.patch_size is not None:
             # Random crop.
@@ -321,13 +326,17 @@ class Dataset:
             x = np.random.randint(0, max(w - self.patch_size, 1))
             y = np.random.randint(0, max(h - self.patch_size, 1))
             image = image[y : y + self.patch_size, x : x + self.patch_size]
+            mask = mask[y : y + self.patch_size, x : x + self.patch_size]  # Crop the mask
             K[0, 2] -= x
             K[1, 2] -= y
 
+        # Apply the mask to the image
+        masked_image = image * (mask > 0)
+    
         data = {
             "K": torch.from_numpy(K).float(),
             "camtoworld": torch.from_numpy(camtoworlds).float(),
-            "image": torch.from_numpy(image).float(),
+            "image": torch.from_numpy(masked_image).float(),
             "image_id": item,  # the index of the image in the dataset
         }
 

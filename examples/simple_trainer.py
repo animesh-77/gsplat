@@ -200,6 +200,19 @@ def create_splats_with_optimizers(
     feature_dim: Optional[int] = None,
     device: str = "cuda",
 ) -> Tuple[torch.nn.ParameterDict, torch.optim.Optimizer]:
+    """
+    splats is a dictionary of parameters
+        - means3d
+        - scales
+        - quats
+        - opacities
+        - sh0
+        - shN
+        - features (not by deafult)
+        - colors (not by default)
+    
+    optimizers is a list of optimizers for each parameter of splats
+    """
     if init_type == "sfm":
         points = torch.from_numpy(parser.points).float()
         rgbs = torch.from_numpy(parser.points_rgb / 255.0).float()

@@ -3,10 +3,9 @@
 # Run gsplat on a list of input files
 # first define some arguments
 sparse_folder="/cs/student/projects4/ml/2023/asrivast/datasets/dress3_15/upright/sparse/undistorted"
-output_folder="/cs/student/projects4/ml/2023/asrivast/datasets/dress3_15/upright/results"
+output_folder="/cs/student/projects4/ml/2023/asrivast/datasets/dress3_15/upright/results2"
 run="run0"
-# Create .tmp directory if it doesn't exist
-mkdir -p .tmp
+
 # run 0
 echo "Running run 0"
 python examples/simple_trainer.py \
@@ -17,6 +16,7 @@ python examples/simple_trainer.py \
     --test_cam_ids 2 15 45 \
     --max_steps 3000 \
     --save_steps 800 1800 \
+    --disable_viewer 
 
 
 
@@ -42,3 +42,4 @@ echo "Running run 1"
 python examples/simple_trainer.py \
     --ckpt $ckpt_file \
     --resume \
+    --disable_viewer 
