@@ -36,6 +36,7 @@ class Parser:
         test_every: Optional[int] = None,
         test_cam_ids: Optional[List[int]] = None,
         train_cam_ids: Optional[List[int]] = None, 
+        masked: bool = False,
     ):
         self.data_dir = data_dir
         self.factor = factor
@@ -43,6 +44,7 @@ class Parser:
         self.test_every = test_every
         self.test_cam_ids = test_cam_ids
         self.train_cam_ids = train_cam_ids
+        self.masked = masked
         
         # searches for a sparse/0 folder where the cameras.bin , images.bin and points3D.bin are stored
         colmap_dir = os.path.join(data_dir, "sparse/0/")
@@ -196,7 +198,8 @@ class Parser:
 
         self.image_names = image_names  # List[str], (num_images,)
         self.image_paths = image_paths  # List[str], (num_images,)
-        self.masks_paths = [img_path.replace("images", "masks") for img_path in image_paths]
+        if self.masked is True:
+            self.masks_paths = [img_path.replace("images", "masks") for img_path in image_paths]
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
@@ -252,6 +255,7 @@ class Dataset:
         split: str = "train",
         patch_size: Optional[int] = None,
         load_depths: bool = False,
+        masked: bool = False,
     ):
         """
         The __init__ function is run once when instantiating the Dataset object
@@ -261,6 +265,7 @@ class Dataset:
         self.patch_size = patch_size
         self.load_depths = load_depths
         indices = np.arange(len(self.parser.image_names))
+        self.masked = masked
         # indices of images to use
         if split == "train":
             if self.parser.test_every is not None:
@@ -301,7 +306,10 @@ class Dataset:
         """
         index = self.indices[item]
         image = imageio.imread(self.parser.image_paths[index])[..., :3]
-        mask = imageio.imread(self.parser.masks_paths[index])  # Load the mask
+        if self.masked is True:
+            mask = imageio.imread(self.parser.masks_paths[index])  # Load the mask
+        else:
+            mask = np.ones_like(image, dtype=np.uint8)
         camera_id = self.parser.camera_ids[index]
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]

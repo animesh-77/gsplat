@@ -46,6 +46,8 @@ class Config:
     resume: bool = False
     # which run are we on
     run: int = 0
+    # whether to use masks of the images
+    masked: bool = False
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
@@ -353,6 +355,7 @@ class Runner:
             test_every=cfg.test_every,
             test_cam_ids=cfg.test_cam_ids,
             train_cam_ids=cfg.train_cam_ids,
+            masked=cfg.masked,
         )
         # Parser is a COLMAP parser that reads the images and the 3D points from the COLMAP model
         # It has attributes like:
@@ -366,8 +369,11 @@ class Runner:
             split="train", # split is either "train" or "val" 
             patch_size=cfg.patch_size,
             load_depths=cfg.depth_loss,
+            masked= cfg.masked,
         )
-        self.valset = Dataset(self.parser, split="val")
+        self.valset = Dataset(self.parser, 
+                              split="val",
+                              masked= cfg.masked,)
         # here "val" so remaining images are used for testing
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
@@ -666,7 +672,7 @@ class Runner:
                 desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
 
-            if cfg.tb_every > 0 and step % cfg.tb_every == 0:
+            if cfg.tb_every > 0 and step % cfg.tb_every == 0 or step == max_steps - 1: 
                 # tensorboard writer here
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 self.writer.add_scalar("train/loss", loss.item(), step)
@@ -675,6 +681,15 @@ class Runner:
                 self.writer.add_scalar(
                     "train/num_GS", len(self.splats["means3d"]), step
                 )
+
+                with torch.no_grad():
+                    print(self.splats["scales"].shape)
+                    max_splat_scale = torch.abs(torch.max(self.splats["scales"], dim= 1).values) # 
+                    print(max_splat_scale.shape)
+                    min_splat_scale = torch.abs(torch.max(self.splats["scales"], dim= 1).values) # min scale of all splats
+                    # add histogram of ratio of max and min scale
+                    ratio= max_splat_scale/ min_splat_scale
+                    self.writer.add_histogram("train/max_splat_scale", ratio, step)
                 self.writer.add_scalar("train/mem", mem, step)
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
