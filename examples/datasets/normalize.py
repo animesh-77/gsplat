@@ -9,8 +9,8 @@ def similarity_from_cameras(c2w, strict_scaling=False, center_method="focus"):
     :param c2w: (N, 4)
     :return T (4,4) , scale (float)
     """
-    t = c2w[:, :3, 3]
-    R = c2w[:, :3, :3]
+    t = c2w[:, :3, 3] # (N, 3)
+    R = c2w[:, :3, :3] 3 (N, 3, 3)
 
     # (1) Rotate the world so that z+ is the up axis
     # we estimate the up axis by averaging the camera up axes

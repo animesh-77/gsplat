@@ -364,6 +364,8 @@ class Runner:
         # - self.points3D:
         # - self.points3D_ids:
         # - self.points3D_id_to_images:
+        # :NOTE points are normalised (scaled/rotated) so they are NOT at the 
+        # same position as COLMAP/sparse/0/points3D.bin
         self.trainset = Dataset(
             self.parser,
             split="train", # split is either "train" or "val" 
