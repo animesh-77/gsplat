@@ -19,20 +19,39 @@ import torch.nn.functional as F
 import viser
 from gsplat._helper import load_test_data
 from gsplat.rendering import rasterization
+import glob
 
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--output_dir", type=str, default="results/", help="where to dump outputs"
-)
-parser.add_argument(
-    "--scene_grid", type=int, default=1, help="repeat the scene into a grid of NxN"
-)
-parser.add_argument("--ckpt", type=str, default=None, help="path to the .pt file")
+# parser.add_argument(
+#     "--output_dir", type=str, default="results/", help="where to dump outputs"
+# )
+# parser.add_argument(
+#     "--scene_grid", type=int, default=1, help="repeat the scene into a grid of NxN"
+# )
+# parser.add_argument("--ckpt", type=str, default=None, help="path to the .pt file")
 parser.add_argument("--port", type=int, default=8080, help="port for the viewer server")
-parser.add_argument(
-    "--backend", type=str, default="gsplat", help="gsplat, gsplat_legacy, inria"
-)
+# parser.add_argument(
+#     "--backend", type=str, default="gsplat", help="gsplat, gsplat_legacy, inria"
+# )
+parser.add_argument("--cwd", type=str, default=".", help="current working directory")
 args = parser.parse_args()
+
+all_ckpt= glob.glob(args.cwd + "/*.pt")
+max_ckpt = all_ckpt[0]
+max_ckpt_index = -1
+for ckpt in all_ckpt:
+    print(os.path.basename(ckpt)[5:-3])
+    ckpt_index = int(os.path.basename(ckpt)[5:-3])
+    if ckpt_index > max_ckpt_index:
+        max_ckpt = ckpt
+        max_ckpt_index = ckpt_index
+args.output_dir = "results/"
+args.scene_grid = 1
+args.ckpt = max_ckpt
+print(f"Using {args.ckpt} as the checkpoint")
+# args.port = 8080
+args.backend = "gsplat"
+
 assert args.scene_grid % 2 == 1, "scene_grid must be odd"
 
 torch.manual_seed(42)
