@@ -351,7 +351,7 @@ class Runner:
         self.parser = Parser(
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
-            normalize=True,
+            normalize=True, # this changes the scale/orientation of the scene
             test_every=cfg.test_every,
             test_cam_ids=cfg.test_cam_ids,
             train_cam_ids=cfg.train_cam_ids,
@@ -600,6 +600,7 @@ class Runner:
             )
             image_ids = data["image_id"].to(device)
             if cfg.depth_loss:
+                # depth loss is False by default
                 points = data["points"].to(device)  # [1, M, 2]
                 depths_gt = data["depths"].to(device)  # [1, M]
 
@@ -638,12 +639,15 @@ class Runner:
             info["means2d"].retain_grad()  # used for running stats
 
             # loss
+            # colors is the rendered image
+            # pixels is the ground truth image
             l1loss = F.l1_loss(colors, pixels)
             ssimloss = 1.0 - self.ssim(
                 pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
             if cfg.depth_loss:
+                # cfg.depth_loss is False by default
                 # query depths from depth map
                 points = torch.stack(
                     [
@@ -685,9 +689,7 @@ class Runner:
                 )
 
                 with torch.no_grad():
-                    print(self.splats["scales"].shape)
                     max_splat_scale = torch.abs(torch.max(self.splats["scales"], dim= 1).values) # 
-                    print(max_splat_scale.shape)
                     min_splat_scale = torch.abs(torch.max(self.splats["scales"], dim= 1).values) # min scale of all splats
                     # add histogram of ratio of max and min scale
                     ratio= max_splat_scale/ min_splat_scale
@@ -1245,7 +1247,7 @@ def main(cfg: Config):
     if not cfg.disable_viewer:
         try:
             print("Viewer running... Ctrl+C to exit.")
-            time.sleep(1000000)
+            time.sleep(10)
         except KeyboardInterrupt:
             print("Viewer stopped.")
 

@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def similarity_from_cameras(c2w, strict_scaling=False, center_method="focus"):
+def similarity_from_cameras(c2w, strict_scaling=False, center_method="focus")->np.ndarray:
     """
     reference: nerf-factory
     Get a similarity transform to normalize dataset
@@ -10,24 +10,24 @@ def similarity_from_cameras(c2w, strict_scaling=False, center_method="focus"):
     :return T (4,4) , scale (float)
     """
     t = c2w[:, :3, 3] # (N, 3)
-    R = c2w[:, :3, :3] 3 (N, 3, 3)
+    R = c2w[:, :3, :3] # (N, 3, 3)
 
     # (1) Rotate the world so that z+ is the up axis
     # we estimate the up axis by averaging the camera up axes
-    ups = np.sum(R * np.array([0, -1.0, 0]), axis=-1)
-    world_up = np.mean(ups, axis=0)
-    world_up /= np.linalg.norm(world_up)
+    ups = np.sum(R * np.array([0, -1.0, 0]), axis=-1) # (N, 3)
+    world_up = np.mean(ups, axis=0) # (3,)
+    world_up /= np.linalg.norm(world_up) # (3,) Unit vector along world up axis
 
-    up_camspace = np.array([0.0, -1.0, 0.0])
-    c = (up_camspace * world_up).sum()
-    cross = np.cross(world_up, up_camspace)
+    up_camspace = np.array([0.0, -1.0, 0.0]) # (3,) Unit vector
+    c = (up_camspace * world_up).sum() # cos(theta) between up_camspace and world_up
+    cross = np.cross(world_up, up_camspace) # (3,) 
     skew = np.array(
         [
             [0.0, -cross[2], cross[1]],
             [cross[2], 0.0, -cross[0]],
             [-cross[1], cross[0], 0.0],
         ]
-    )
+    ) # (3, 3) 
     if c > -1:
         R_align = np.eye(3) + skew + (skew @ skew) * 1 / (1 + c)
     else:
@@ -36,34 +36,34 @@ def similarity_from_cameras(c2w, strict_scaling=False, center_method="focus"):
         R_align = np.array([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
 
     #  R_align = np.eye(3) # DEBUG
-    R = R_align @ R
-    fwds = np.sum(R * np.array([0, 0.0, 1.0]), axis=-1)
-    t = (R_align @ t[..., None])[..., 0]
+    R = R_align @ R # (N, 3, 3)
+    fwds = np.sum(R * np.array([0, 0.0, 1.0]), axis=-1) # (N, 3)
+    t = (R_align @ t[..., None])[..., 0] # (N, 3)
 
     # (2) Recenter the scene.
     if center_method == "focus":
         # find the closest point to the origin for each camera's center ray
-        nearest = t + (fwds * -t).sum(-1)[:, None] * fwds
-        translate = -np.median(nearest, axis=0)
+        nearest = t + (fwds * -t).sum(-1)[:, None] * fwds # (N, 3)
+        translate = -np.median(nearest, axis=0) # (3,)
     elif center_method == "poses":
         # use center of the camera positions
-        translate = -np.median(t, axis=0)
+        translate = -np.median(t, axis=0) # (3,)
     else:
         raise ValueError(f"Unknown center_method {center_method}")
 
-    transform = np.eye(4)
-    transform[:3, 3] = translate
-    transform[:3, :3] = R_align
+    transform = np.eye(4) # (4, 4)
+    transform[:3, 3] = translate # (3,)
+    transform[:3, :3] = R_align # (3, 3)
 
     # (3) Rescale the scene using camera distances
     scale_fn = np.max if strict_scaling else np.median
     scale = 1.0 / scale_fn(np.linalg.norm(t + translate, axis=-1))
     transform[:3, :] *= scale
 
-    return transform
+    return transform # (4, 4)
 
 
-def align_principle_axes(point_cloud):
+def align_principle_axes(point_cloud) -> np.ndarray:
     # Compute centroid
     centroid = np.median(point_cloud, axis=0)
 
@@ -94,7 +94,7 @@ def align_principle_axes(point_cloud):
     transform[:3, :3] = rotation_matrix
     transform[:3, 3] = -rotation_matrix @ centroid
 
-    return transform
+    return transform # (4, 4)
 
 
 def transform_points(matrix, points):
@@ -108,7 +108,9 @@ def transform_points(matrix, points):
         Nx3 array of transformed points
     """
     assert matrix.shape == (4, 4)
+    # transform matrix should be 4x4
     assert len(points.shape) == 2 and points.shape[1] == 3
+    # points should be Nx3
     return points @ matrix[:3, :3].T + matrix[:3, 3]
 
 
