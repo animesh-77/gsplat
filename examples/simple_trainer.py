@@ -32,6 +32,7 @@ from utils import (
 
 from gsplat.rendering import rasterization
 from plyfile import PlyData, PlyElement
+from scipy.spatial import cKDTree
 
 
 @dataclass
@@ -216,11 +217,11 @@ def create_splats_with_optimizers(
     optimizers is a list of optimizers for each parameter of splats
     """
     if init_type == "sfm":
-        points = torch.from_numpy(parser.points).float()
-        rgbs = torch.from_numpy(parser.points_rgb / 255.0).float()
+        points = torch.from_numpy(parser.points).float() # (N, 3)
+        rgbs = torch.from_numpy(parser.points_rgb / 255.0).float() # (N, 3)
     elif init_type == "random":
-        points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1)
-        rgbs = torch.rand((init_num_pts, 3))
+        points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1) # [N, 3]
+        rgbs = torch.rand((init_num_pts, 3)) # [N, 3]
     else:
         raise ValueError("Please specify a correct init_type: sfm or random")
     # points and rgb are torch tensors
@@ -356,6 +357,7 @@ class Runner:
             test_cam_ids=cfg.test_cam_ids,
             train_cam_ids=cfg.train_cam_ids,
             masked=cfg.masked,
+            config_files_path= self.config_dir,
         )
         # Parser is a COLMAP parser that reads the images and the 3D points from the COLMAP model
         # It has attributes like:
@@ -526,6 +528,41 @@ class Runner:
         )
         return render_colors, render_alphas, info
 
+    def splat_scale_loss(self) -> Tensor:
+        """
+        for every GS, calculate the scale loss which is the ratio of max and min scale of each GS
+
+        """
+        scales = torch.exp(self.splats["scales"])
+        scale_loss = torch.log(scales.max(dim=0).values / scales.min(dim=0).values).mean()
+        return scale_loss
+    
+    def near_splat_loss(self) -> Tensor:
+        """
+        For every guassian splat, get the nearest splat and calculate the difference in their colors and rotations
+        """
+        tree = cKDTree(self.splats["means3d"].cpu().detach().numpy())
+        _, indices = tree.query(self.splats["means3d"].cpu().detach().numpy(), k=4)
+        # distances (N, k=4)
+        # indices (N, k=4)
+        indices = torch.from_numpy(indices).to(self.device) # (N, k=4)
+        # get the nearest splats
+        nearest_splats = self.splats["means3d"][indices[:, 1:]] # (N, k=4-1, 3)
+        nearest_quats = self.splats["quats"][indices[:, 1:]] # (N, k=4-1, 4)
+        # nearest_colors = self.splats["colors"][indices[:, 1]]
+
+        # Expand current splats and quats to match nearest splats and quats dimensions for broadcasting
+        current_splats = self.splats["means3d"].unsqueeze(1).expand_as(nearest_splats)  # (N, k-1, 3)
+        current_quats = self.splats["quats"].unsqueeze(1).expand_as(nearest_quats)      # (N, k-1, 4)
+
+        # Calculate distances and quaternion differences
+        distances = torch.norm(nearest_splats - current_splats, dim=2)  # (N, k-1)
+        quat_diffs = torch.norm(nearest_quats - current_quats, dim=2)   # (N, k-1)
+
+        # Calculate the loss using vectorized operations
+        loss = (distances * quat_diffs).mean()
+        return loss
+    
     def train(self):
         """
         self is an instance of class Runner
@@ -539,10 +576,11 @@ class Runner:
 
         # Dump cfg
         # let this be. This json serves as a record of the config used for run0
+        # save .json for index of all images. This can be used for next runs
         if self.cfg.run == 0:
             dict_to_save = self.cfg.__dict__
-            dict_to_save["train_images"]= [self.parser.image_names[i] for i in self.parser.train_cam_ids]
-            dict_to_save["test_images"]= [self.parser.image_names[i] for i in self.parser.test_cam_ids]
+            dict_to_save["train_images"]= [(int(i), self.parser.image_names[i]) for i in self.trainset.indices]
+            dict_to_save["test_images"]= [(int(i), self.parser.image_names[i]) for i in self.valset.indices]
             with open(f"{cfg.result_dir}/cfg.json", "w") as f:
                 json.dump(dict_to_save, f, indent=4)
             self.save_img_list()
@@ -642,10 +680,20 @@ class Runner:
             # colors is the rendered image
             # pixels is the ground truth image
             l1loss = F.l1_loss(colors, pixels)
+            l2loss = F.mse_loss(colors, pixels)
             ssimloss = 1.0 - self.ssim(
                 pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
             )
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+            lpipsloss = self.lpips(pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)/255.0)
+            scale_loss = self.splat_scale_loss()
+            nearby_splat_loss = self.near_splat_loss()
+            loss = l1loss * (1.0 - cfg.ssim_lambda) + \
+                ssimloss * cfg.ssim_lambda + \
+                scale_loss * 0.7 + \
+                l2loss * 0.3 + \
+                lpipsloss * 0.7 + \
+                nearby_splat_loss
+            # loss= scale_loss * 0.7 + 0.3* lpipsloss+ nearby_splat_loss * 0.7
             if cfg.depth_loss:
                 # cfg.depth_loss is False by default
                 # query depths from depth map
@@ -690,10 +738,10 @@ class Runner:
 
                 with torch.no_grad():
                     max_splat_scale = torch.abs(torch.max(self.splats["scales"], dim= 1).values) # 
-                    min_splat_scale = torch.abs(torch.max(self.splats["scales"], dim= 1).values) # min scale of all splats
+                    min_splat_scale = torch.abs(torch.min(self.splats["scales"], dim= 1).values) # min scale of all splats
                     # add histogram of ratio of max and min scale
                     ratio= max_splat_scale/ min_splat_scale
-                    self.writer.add_histogram("train/max_splat_scale", ratio, step)
+                    self.writer.add_histogram("train/splats_scale", ratio, step)
                 self.writer.add_scalar("train/mem", mem, step)
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
@@ -1196,8 +1244,8 @@ class Runner:
         os.makedirs(os.path.dirname(config_file_path), exist_ok=True)
         dict_to_save= self.cfg.__dict__
         # in this dict add a key with list of image names
-        dict_to_save["train_images"]= [self.parser.image_names[i] for i in self.parser.train_cam_ids]
-        dict_to_save["test_images"]= [self.parser.image_names[i] for i in self.parser.test_cam_ids]
+        dict_to_save["train_images"]= [(int(i), self.parser.image_names[i]) for i in self.trainset.indices]
+        dict_to_save["test_images"]= [(int(i), self.parser.image_names[i]) for i in self.valset.indices]
         with open(config_file_path, 'w') as f:
             json.dump(dict_to_save, f, indent=4)
     def save_img_list(self):

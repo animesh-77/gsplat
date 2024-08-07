@@ -37,6 +37,7 @@ class Parser:
         test_cam_ids: Optional[List[int]] = None,
         train_cam_ids: Optional[List[int]] = None, 
         masked: bool = False,
+        config_files_path: str = "",
     ):
         self.data_dir = data_dir
         self.factor = factor
@@ -59,6 +60,7 @@ class Parser:
         manager.load_cameras()
         manager.load_images()
         manager.load_points3D()
+        # manager.load_SMPL_points3D()
 
         # Extract extrinsic matrices in world-to-camera format.
         imdata = manager.images
@@ -172,6 +174,9 @@ class Parser:
         points_rgb = manager.point3D_colors.astype(np.uint8)
         point_indices = dict()
 
+        # vertices from SMPL model
+        # SMPL_points = manager.SMPL_points3D.astype(np.float64)
+
         image_id_to_name = {v: k for k, v in manager.name_to_image_id.items()}
         for point_id, data in manager.point3D_id_to_images.items():
             for image_id, _ in data:
@@ -184,22 +189,25 @@ class Parser:
 
         # Normalize the world space.
         if normalize:
-            T1 = similarity_from_cameras(camtoworlds)
-            camtoworlds = transform_cameras(T1, camtoworlds)
-            points = transform_points(T1, points)
+            T1 = similarity_from_cameras(camtoworlds) # (4, 4)
+            np.save(f"{config_files_path}/T1.npy", T1)
+            camtoworlds = transform_cameras(T1, camtoworlds) # (N, 4, 4)
+            points = transform_points(T1, points) # (M, 3)
 
-            T2 = align_principle_axes(points)
-            camtoworlds = transform_cameras(T2, camtoworlds)
-            points = transform_points(T2, points)
+            T2 = align_principle_axes(points) # (4, 4)
+            np.save(f"{config_files_path}/T2.npy", T2)
+            camtoworlds = transform_cameras(T2, camtoworlds) # (N, 4, 4)
+            points = transform_points(T2, points) # (M, 3)
 
-            transform = T2 @ T1
+            transform = T2 @ T1 # (4, 4)
         else:
-            transform = np.eye(4)
+            transform = np.eye(4) # (4, 4)
 
         self.image_names = image_names  # List[str], (num_images,)
         self.image_paths = image_paths  # List[str], (num_images,)
         if self.masked is True:
-            self.masks_paths = [img_path.replace("images", "masks") for img_path in image_paths]
+            # self.masks_paths = [img_path.replace("images", "masks_bb_jpg") for img_path in image_paths]
+            self.masks_paths = [img_path.replace("images", "masks_jpg") for img_path in image_paths]
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
@@ -210,6 +218,7 @@ class Parser:
         self.points_rgb = points_rgb  # np.ndarray, (num_points, 3)
         self.point_indices = point_indices  # Dict[str, np.ndarray], image_name -> [M,]
         self.transform = transform  # np.ndarray, (4, 4)
+        # self.SMPL_points = SMPL_points  # np.ndarray, (6890, 3)
 
         # undistortion
         self.mapx_dict = dict()
@@ -238,9 +247,13 @@ class Parser:
 
         # size of the scene measured by cameras
         camera_locations = camtoworlds[:, :3, 3]
+        # only the translation part of the extrinsic matrix
         scene_center = np.mean(camera_locations, axis=0)
+        # centroid of the camera locations
         dists = np.linalg.norm(camera_locations - scene_center, axis=1)
+        # euclidean distance of each camera from the centroid
         self.scene_scale = np.max(dists)
+        # maximum distance of a camera from the centroid
 
 
 class Dataset:
@@ -275,7 +288,7 @@ class Dataset:
                 # if self.parser.test_every = 8
                 # X 1 2 3 4 5 6 7 X 9 10 11 12 13 14 15 X
             else:
-                self.indices = self.parser.test_cam_ids
+                self.indices = sorted(self.parser.train_cam_ids)
                 
         else:
             # if self.parser.test_every = 8
@@ -283,7 +296,7 @@ class Dataset:
             if self.parser.test_every is not None:
                 self.indices = indices[indices % self.parser.test_every == 0]
             else:
-                self.indices = self.parser.train_cam_ids
+                self.indices = sorted(self.parser.test_cam_ids)
 
     def __len__(self):
         """
@@ -305,11 +318,13 @@ class Dataset:
         --depths:
         """
         index = self.indices[item]
-        image = imageio.imread(self.parser.image_paths[index])[..., :3]
+        image = imageio.imread(self.parser.image_paths[index])[..., :3] # (H, W, 3)
+        # drops the alpha channel if it exists
         if self.masked is True:
-            mask = imageio.imread(self.parser.masks_paths[index])  # Load the mask
+            mask = imageio.imread(self.parser.masks_paths[index])  # Load the mask which is a binary image
+            # (H, W) 0=background, 255=foreground
         else:
-            mask = np.ones_like(image, dtype=np.uint8)
+            mask = np.ones_like(image, dtype=np.uint8)*255
         camera_id = self.parser.camera_ids[index]
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]
@@ -322,6 +337,7 @@ class Dataset:
                 self.parser.mapy_dict[camera_id],
             )
             image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
+            raise NotImplementedError
             mask = cv2.remap(mask, mapx, mapy, cv2.INTER_LINEAR)  # Undistort the mask
             x, y, w, h = self.parser.roi_undist_dict[camera_id]
             image = image[y : y + h, x : x + w]
@@ -334,12 +350,15 @@ class Dataset:
             x = np.random.randint(0, max(w - self.patch_size, 1))
             y = np.random.randint(0, max(h - self.patch_size, 1))
             image = image[y : y + self.patch_size, x : x + self.patch_size]
+            raise NotImplementedError
             mask = mask[y : y + self.patch_size, x : x + self.patch_size]  # Crop the mask
             K[0, 2] -= x
             K[1, 2] -= y
 
         # Apply the mask to the image
-        masked_image = image * (mask > 0)
+        idx = mask == 0 # all the background pixels
+        masked_image= image.copy()
+        masked_image[idx] = 0
     
         data = {
             "K": torch.from_numpy(K).float(),
