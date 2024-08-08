@@ -64,7 +64,7 @@ class Parser:
         # manager.load_SMPL_points3D()
 
         # Extract extrinsic matrices in world-to-camera format.
-        imdata = manager.images
+        imdata = manager.images # OrderedDict of Image objects
         w2c_mats = []
         camera_ids = []
         Ks_dict = dict()

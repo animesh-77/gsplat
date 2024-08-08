@@ -618,14 +618,15 @@ class Runner:
     @torch.no_grad()
     def SMPL_far_filter(self, tolerance: float= 0.1)-> None:
         """
-        remove gaussians which are far from the SMPL mesh
+        remove gaussians which are far from the SMPL mesh and very transparent
         This is done only at the last step
         """
         tree = cKDTree(self.SMPL.cpu().detach().numpy())
         distances, indices = tree.query(self.splats["means3d"].cpu().detach().numpy(), k=1)
         intial_gaussians= len(self.splats["means3d"])
-        # distances (N, k=1)
-        # indices (N, k=1)
+        # distances (N,)
+        # indices (N,)
+        # opacities= torch.sigmoid(self.splats["opacities"]).cpu().detach().numpy()
         near_indices= distances < tolerance
         self.splats["means3d"]= self.splats["means3d"][near_indices]
         self.splats["scales"]= self.splats["scales"][near_indices]
@@ -972,9 +973,13 @@ class Runner:
                 self.eval(step)
 
                 # Remove far splats
-                self.SMPL_far_filter()
-                self.save_ply(step, "_filtered")
-                print(f"PLY file saved to {self.ply_dir}/save_{step}_filtered.ply")
+                if self.SMPL is not None:
+                    print("Filtering far splats")
+                    self.SMPL_far_filter()
+                    self.save_ply(step, "_filtered")
+                    print(f"PLY file saved to {self.ply_dir}/save_{step}_filtered.ply")
+                else:
+                    print("SMPL not found, skipping filtering")
                 # torch.save(
                 #     {
                 #         "step": step,
