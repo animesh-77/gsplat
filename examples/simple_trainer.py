@@ -17,6 +17,7 @@ import viser
 import nerfview
 from datasets.colmap import Dataset, Parser
 from datasets.traj import generate_interpolated_path
+from datasets import normalize
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
@@ -32,6 +33,8 @@ from utils import (
 
 from gsplat.rendering import rasterization
 from plyfile import PlyData, PlyElement
+import vedo
+from pathlib import Path
 from scipy.spatial import cKDTree
 
 
@@ -123,6 +126,8 @@ class Config:
     reset_every: int = 3000
     # Refine GSs every this steps
     refine_every: int = 100
+    # Max gaussians to keep in the scene
+    max_gaussians: int = 30_000
 
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
     packed: bool = False
@@ -188,6 +193,23 @@ class Config:
         cfg.ckpt= self.ckpt
         cfg.resume= True
         return cfg
+
+def load_SMPL_file_obj(data_dir: str, T1: str, T2: str):
+    """
+    Load the SMPL .obj mesh and return only the vertices
+    the faces are not needed
+    """
+    T1= np.load(T1)
+    T2= np.load(T2)
+    
+    data_dir= Path(data_dir)
+    obj_file = list(data_dir.rglob("*.obj"))[0]
+    mesh = vedo.Mesh(obj_file.as_posix())
+    xyz= mesh.vertices
+
+    xyz= normalize.transform_points(T1, xyz)
+    xyz= normalize.transform_points(T2, xyz)
+    return xyz
 
 def create_splats_with_optimizers(
     parser: Parser,
@@ -404,6 +426,12 @@ class Runner:
                 feature_dim=feature_dim,
                 device=self.device,
             )
+            try:
+                self.SMPL= load_SMPL_file_obj(self.cfg.data_dir, f"{self.config_dir}/T1.npy", f"{self.config_dir}/T2.npy")
+                self.SMPL= torch.from_numpy(self.SMPL).to(self.device)
+            except IndexError:
+                self.SMPL= None
+                print("SMPL .obj file not found")
         else:
             # resume is True, we are resuming from a checkpoint
             # we are resuming from a checkpoint
@@ -419,6 +447,12 @@ class Runner:
                 sparse_grad=cfg.sparse_grad,
                 device=self.device,
             )
+            try:
+                self.SMPL= load_SMPL_file_obj(self.cfg.data_dir, f"{self.config_dir}/T1.npy", f"{self.config_dir}/T2.npy")
+                self.SMPL= torch.from_numpy(self.SMPL).to(self.device)
+            except IndexError:
+                self.SMPL= None
+                print("SMPL .obj file not found")
 
         print("Model initialized. Number of GS:", len(self.splats["means3d"]))
 
@@ -563,6 +597,36 @@ class Runner:
         loss = (distances * quat_diffs).mean()
         return loss
     
+    def SMPL_loss(self) -> Tensor:
+        """
+        for each splat get the closest point on the SMPL mesh and calculate the loss
+        """
+        tree = cKDTree(self.SMPL.cpu().detach().numpy())
+        _, indices = tree.query(self.splats["means3d"].cpu().detach().numpy(), k=1)
+        # distances (N, k=1)
+        # indices (N, k=1)
+        indices = torch.from_numpy(indices).to(self.device)
+        nearest_points = self.SMPL[indices] # (N, 3)
+        distances = torch.norm(nearest_points - self.splats["means3d"], dim=1) # (N,)
+        loss = distances.mean()
+        return loss
+
+    @torch.no_grad()
+    def total_splats(self) -> int:
+        return len(self.splats["means3d"])
+    
+    @torch.no_grad()
+    def SMPL_far_filter(self) :
+        """
+        remove gaussians which are far from the SMPL mesh
+        """
+        tree = cKDTree(self.SMPL.cpu().detach().numpy())
+        _, indices = tree.query(self.splats["means3d"].cpu().detach().numpy(), k=1)
+        # distances (N, k=1)
+        # indices (N, k=1)
+        indices = torch.from_numpy(indices).to(self.device)
+        nearest_points = self.SMPL[indices]
+
     def train(self):
         """
         self is an instance of class Runner
@@ -684,16 +748,18 @@ class Runner:
             ssimloss = 1.0 - self.ssim(
                 pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
             )
-            lpipsloss = self.lpips(pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)/255.0)
-            scale_loss = self.splat_scale_loss()
-            nearby_splat_loss = self.near_splat_loss()
+            # lpipsloss = self.lpips(pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)/255.0)
+            # scale_loss = self.splat_scale_loss()
+            # nearby_splat_loss = self.near_splat_loss()
+            # SMPL_loss = self.SMPL_loss()
             loss = l1loss * (1.0 - cfg.ssim_lambda) + \
-                ssimloss * cfg.ssim_lambda + \
-                scale_loss * 0.7 + \
-                l2loss * 0.3 + \
-                lpipsloss * 0.7 + \
-                nearby_splat_loss
-            # loss= scale_loss * 0.7 + 0.3* lpipsloss+ nearby_splat_loss * 0.7
+                ssimloss * cfg.ssim_lambda +  l2loss * 0.3  \
+            #     scale_loss * 0.7 + \
+            #    + \
+            #     lpipsloss * 0.7 + \
+            #     SMPL_loss * 0.7 
+                # nearby_splat_loss
+            # loss= SMPL_loss * 0.3+ nearby_splat_loss * 0.7
             if cfg.depth_loss:
                 # cfg.depth_loss is False by default
                 # query depths from depth map
@@ -751,6 +817,10 @@ class Runner:
                     self.writer.add_image("train/render", canvas, step)
                 self.writer.flush()
 
+            if self.total_splats() > cfg.max_gaussians and cfg.refine_stop_iter > step:
+                print("Max splats reached. Stopping refinement.")
+                cfg.refine_stop_iter = step
+            
             # update running stats for prunning & growing
             if step < cfg.refine_stop_iter:
                 self.update_running_stats(info)
@@ -950,7 +1020,7 @@ class Runner:
             "nij,nj,bnj->bni",
             rotmats,
             scales,
-            torch.randn(2, len(scales), 3, device=device),
+            0.5* torch.randn(2, len(scales), 3, device=device),
         )  # [2, N, 3]
 
         for optimizer in self.optimizers:
