@@ -616,16 +616,29 @@ class Runner:
         return len(self.splats["means3d"])
     
     @torch.no_grad()
-    def SMPL_far_filter(self) :
+    def SMPL_far_filter(self, tolerance: float= 0.1)-> None:
         """
         remove gaussians which are far from the SMPL mesh
+        This is done only at the last step
         """
         tree = cKDTree(self.SMPL.cpu().detach().numpy())
-        _, indices = tree.query(self.splats["means3d"].cpu().detach().numpy(), k=1)
+        distances, indices = tree.query(self.splats["means3d"].cpu().detach().numpy(), k=1)
+        intial_gaussians= len(self.splats["means3d"])
         # distances (N, k=1)
         # indices (N, k=1)
-        indices = torch.from_numpy(indices).to(self.device)
-        nearest_points = self.SMPL[indices]
+        near_indices= distances < tolerance
+        self.splats["means3d"]= self.splats["means3d"][near_indices]
+        self.splats["scales"]= self.splats["scales"][near_indices]
+        self.splats["quats"]= self.splats["quats"][near_indices]
+        self.splats["opacities"]= self.splats["opacities"][near_indices]
+        self.splats["sh0"]= self.splats["sh0"][near_indices]
+        self.splats["shN"]= self.splats["shN"][near_indices]
+        if "features" in self.splats:
+            self.splats["features"]= self.splats["features"][near_indices]
+        if "colors" in self.splats:
+            self.splats["colors"]= self.splats["colors"][near_indices]
+        final_gaussians= len(self.splats["means3d"])
+        print(f"Last step {intial_gaussians- final_gaussians} GSs pruned. Now having {final_gaussians} GSs.")
 
     def train(self):
         """
@@ -910,7 +923,7 @@ class Runner:
 
             # at save steps we save the model, config files
             # we can later continue training from any of these checkpoints
-            if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
+            if step in [i - 1 for i in cfg.save_steps]:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 stats = {
                     "mem": mem,
@@ -935,12 +948,48 @@ class Runner:
                 print(f"PLY file saved to {self.ply_dir}/save_{step}.ply")
                 # save the config file
             if step == max_steps - 1: # last step
+                mem = torch.cuda.max_memory_allocated() / 1024**3
+                stats = {
+                    "mem": mem,
+                    "ellipse_time": time.time() - global_tic,
+                    "num_GS": len(self.splats["means3d"]),
+                }
+                print("Step: ", step, stats)
+                with open(f"{self.stats_dir}/save_step_{step}.json", "w") as f:
+                    json.dump(stats, f)
+                    
+                torch.save(
+                    {
+                        "step": step,
+                        "splats": self.splats.state_dict(),
+                    },
+                    f"{self.ckpt_dir}/ckpt_{step}.pt",
+                )
+                # save the ply file only on save steps not on eval steps
+                # on eval steps we only want to evaluate the model
+                self.save_ply(step)
+                print(f"PLY file saved to {self.ply_dir}/save_{step}.ply")
+                self.eval(step)
+
+                # Remove far splats
+                self.SMPL_far_filter()
+                self.save_ply(step, "_filtered")
+                print(f"PLY file saved to {self.ply_dir}/save_{step}_filtered.ply")
+                # torch.save(
+                #     {
+                #         "step": step,
+                #         "splats": self.splats.state_dict(),
+                #     },
+                #     f"{self.ckpt_dir}/ckpt_{step}_filtered.pt",
+                # ) # this would cause error with run0->run1->run2
+
+                # save the config file
                 self.save_config(step)
 
             # evaluation done on the evaluation cameras
             # for all eval steps and last step
-            if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1:
-                # run eavlulation on eval_steps and just before last step
+            if step in [i - 1 for i in cfg.eval_steps]:
+                # run eavlulation on eval_steps
                 self.eval(step)
                 # self.render_traj(step)
 
@@ -1279,7 +1328,7 @@ class Runner:
 
     # Experimental
     @torch.no_grad()
-    def save_ply(self, steps: int):
+    def save_ply(self, steps: int, extra:str=""):
         """
         Model saved as .ply file on save steps
         self.ply_dir is the path to the folder we want to save the ply files
@@ -1300,7 +1349,7 @@ class Runner:
         attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
-        ply_file_path = os.path.join(self.ply_dir, f"step_{steps}.ply")
+        ply_file_path = os.path.join(self.ply_dir, f"step_{steps}{extra}.ply")
         PlyData([el]).write(ply_file_path)
 
     def save_config(self, step: int):
