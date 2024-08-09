@@ -13,7 +13,8 @@ from segment_anything import sam_model_registry, SamPredictor
 parser = argparse.ArgumentParser()
 parser.add_argument("--image_path", type=str, default=False, 
                     help="Path to the fodler with images, masks_jpg and masked_images folders")
-
+parser.add_argument("--point_samples", type=int, default=10,
+                    help="Number of points to sample from the mask from Detectron2 to fed as prompt to SAM")
 args = parser.parse_args()
 
 
@@ -47,6 +48,10 @@ sam_predictor = SamPredictor(sam)
 
 
 all_jpgs= glob.glob(f'{args.image_path}/images/*.jpg')
+if len(all_jpgs) == 0:
+    all_jpgs= glob.glob(f'{args.image_path}/images/*.JPG')
+else:
+    raise AssertionError("No images found to generate masks. Either do not use mask or FIX THIS")
 print(f"total images: {len(all_jpgs)}.Generating masks for all images")
 
 one_or_many= False # True for single point, False for multiple points
@@ -71,7 +76,7 @@ for jpg in tqdm(all_jpgs):
                 # indices of array elements that are non-zero, grouped by element
                 # (N, 2) array where N is the number of non-zero elements in the mask
                 # Ensure we do not sample more points than available in the mask
-                num_samples = min(10, len(all_f))
+                num_samples = min(args.point_samples, len(all_f))
                 point_indices = np.random.choice(len(all_f), size=num_samples, replace=False)
                 # all_f[point_indices] (num_samples, 2)
                 point_inputs = np.vstack([point_inputs, all_f[point_indices]])
