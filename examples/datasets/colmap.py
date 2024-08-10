@@ -209,6 +209,8 @@ class Parser:
         if self.masked is True:
             # self.masks_paths = [img_path.replace("images", "masks_bb_jpg") for img_path in image_paths]
             self.masks_paths = [img_path.replace("images", "masks_jpg") for img_path in image_paths]
+            # self.masks_paths = [img_path.replace("undistorted", "undistorted_masks_jpg") for img_path in image_paths]
+            assert os.path.exists(self.masks_paths[0]), f"Mask file {self.masks_paths} does not exist."
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
@@ -323,6 +325,8 @@ class Dataset:
         # drops the alpha channel if it exists
         if self.masked is True:
             mask = imageio.imread(self.parser.masks_paths[index])  # Load the mask which is a binary image
+            # due to cv2 dilation erosion there are some pixels with values != 0 or 255
+            mask= np.where(mask>10, 255, 0)
             # (H, W) 0=background, 255=foreground
         else:
             mask = np.ones_like(image, dtype=np.uint8)*255
@@ -366,6 +370,7 @@ class Dataset:
             "camtoworld": torch.from_numpy(camtoworlds).float(),
             "image": torch.from_numpy(masked_image).float(),
             "image_id": item,  # the index of the image in the dataset
+            "mask": torch.from_numpy(mask).float(),
         }
 
         if self.load_depths:
