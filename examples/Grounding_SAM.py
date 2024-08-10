@@ -1,0 +1,112 @@
+import glob, os
+import numpy as np
+import cv2
+from tqdm import tqdm
+import argparse
+from segment_anything import sam_model_registry, SamPredictor
+
+def segment(sam_predictor: SamPredictor, image: np.ndarray, detections) -> np.ndarray:
+    sam_predictor.set_image(image)
+    final_mask = np.zeros(image.shape[:2], dtype=bool)
+    for detection in detections:
+        box = detection[0]
+        x, y, w, h = box
+        bbox = np.array([x, y, x+w, y+h])
+        masks, _, _ = sam_predictor.predict(point_coords=None,
+                                            point_labels=None,
+                                            box= bbox,
+                                            multimask_output=True,)
+        final_mask = np.logical_or(final_mask, masks[0])
+        final_mask= np.logical_or(final_mask, masks[1])
+        final_mask= np.logical_or(final_mask, masks[2])
+
+    # logical_or of all masks
+    return final_mask
+
+
+# add command line arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--image_path", type=str, default=".", 
+                    help="Path to the fodler with images, masks_jpg and masked_images folders")
+parser.add_argument("--classes", type= list, default=["person", "hands", "handbag", "glasses", "white clothes", "sun glasses", "leather"],
+                    help="List of classes to be masked")
+args = parser.parse_args()
+
+
+# Grounding DINO imports
+from groundingdino.util.inference import Model
+GROUNDING_DINO_CHECKPOINT_PATH = os.path.join("/cs/student/projects4/ml/2023/asrivast/SAM_models/groundingdino_swint_ogc.pth")
+# print(GROUNDING_DINO_CHECKPOINT_PATH, "; exist:", os.path.isfile(GROUNDING_DINO_CHECKPOINT_PATH))
+GROUNDING_DINO_CONFIG_PATH = os.path.join("/cs/student/projects4/ml/2023/asrivast/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py")
+# print(GROUNDING_DINO_CONFIG_PATH, "; exist:", os.path.isfile(GROUNDING_DINO_CONFIG_PATH))
+grounding_dino_model = Model(model_config_path=GROUNDING_DINO_CONFIG_PATH, model_checkpoint_path=GROUNDING_DINO_CHECKPOINT_PATH)
+
+
+# SAM imports
+sam_checkpoint = "/cs/student/projects4/ml/2023/asrivast/SAM_models/sam_vit_h_4b8939.pth"
+model_type = "vit_h"
+device = "cuda"
+sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+sam.to(device=device)
+sam_predictor = SamPredictor(sam)
+
+
+CLASSES = args.classes
+BOX_TRESHOLD = 0.15
+TEXT_TRESHOLD = 0.15
+
+
+
+
+all_jpgs= glob.glob(f'{args.image_path}/*.jpg')
+if len(all_jpgs) == 0:
+    all_jpgs= glob.glob(f'{args.image_path}/*.JPG')
+if len(all_jpgs) == 0:
+    raise AssertionError("No images found to generate masks. Either do not use mask or FIX THIS")
+print(f"total images: {len(all_jpgs)}.Generating masks for all images")
+
+
+for jpg in tqdm(all_jpgs):
+    
+    img = cv2.imread(jpg)
+
+
+    # detect objects with DINO
+    detections = grounding_dino_model.predict_with_classes(
+        image=img,
+        classes=CLASSES,
+        box_threshold=BOX_TRESHOLD,
+        text_threshold=TEXT_TRESHOLD
+    )
+
+
+    final_mask = segment(
+        sam_predictor=sam_predictor,
+        image=cv2.cvtColor(img, cv2.COLOR_BGR2RGB),
+        detections=detections
+    )
+
+    # output_mask= np.zeros(img.shape[:2], dtype=bool)
+    # for detection in detections:
+    #     confidence, class_id, mask = detection[2], detection[3], detection.mask
+
+    #     # Dilate the mask before adding to the output mask
+    kernel = np.ones((5,5),np.uint8)
+    final_mask= cv2.dilate(final_mask.astype(np.uint8), kernel, iterations=3)
+    
+
+    mask_name = jpg.replace("images", "masks_jpg")
+    os.makedirs(os.path.dirname(mask_name), exist_ok=True)
+    cv2.imwrite(mask_name, (final_mask * 255).astype(np.uint8))
+
+
+    # save masked image
+    masked_img= cv2.bitwise_and(img, img, mask= final_mask.astype(np.uint8))
+    masked_img_name= jpg.replace("images", "masked_images_dino")
+    os.makedirs(os.path.dirname(masked_img_name), exist_ok=True)
+    cv2.imwrite(masked_img_name, masked_img)
+
+mask_name = os.path.dirname(jpg.replace("images", "masks_jpg"))
+print(f"Mask saved at         {mask_name}")
+masked_img_name= os.path.dirname(jpg.replace("images", "masked_images_dino"))
+print(f"Masked image saved at {masked_img_name}")
