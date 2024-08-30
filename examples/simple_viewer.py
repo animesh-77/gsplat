@@ -37,6 +37,7 @@ parser.add_argument("--cwd", type=str, default=".", help="current working direct
 args = parser.parse_args()
 
 all_ckpt= glob.glob(args.cwd + "/*.pt")
+all_ckpt= [i for i in all_ckpt if "filter" not in i]
 max_ckpt = all_ckpt[0]
 max_ckpt_index = -1
 for ckpt in all_ckpt:

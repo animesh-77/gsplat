@@ -22,6 +22,8 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from focal_frequency_loss import FocalFrequencyLoss as FFL
+
 from utils import (
     AppearanceOptModule,
     CameraOptModule,
@@ -29,6 +31,8 @@ from utils import (
     normalized_quat_to_rotmat,
     rgb_to_sh,
     set_random_seed,
+    # LaplacianPyramidLoss,
+    # PerceptualLoss
 )
 
 from gsplat.rendering import rasterization
@@ -127,7 +131,9 @@ class Config:
     # Refine GSs every this steps
     refine_every: int = 100
     # Max gaussians to keep in the scene
-    max_gaussians: int = 30_000
+    max_gaussians: Optional[int] = None
+    # Whether to use the SMPL model
+    use_SMPL: bool = False
 
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
     packed: bool = False
@@ -168,6 +174,15 @@ class Config:
     tb_every: int = 100
     # Save training images to tensorboard
     tb_save_image: bool = False
+
+    def __post_init__(self):
+        """
+        Change some parameters based on the config
+        - eval steps at 1/3 and 2/3 and last step 
+
+        """
+        self.eval_steps = [self.max_steps // 3, 2 * self.max_steps // 3, self.max_steps]
+        self.save_steps = [self.max_steps]
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -211,6 +226,24 @@ def load_SMPL_file_obj(data_dir: str, T1: str, T2: str):
     xyz= normalize.transform_points(T2, xyz)
     return xyz
 
+def load_SMPL_file_ply(data_dir: str, T1: str, T2: str):
+    """
+    Load the SMPL .obj mesh and return only the vertices
+    the faces are not needed
+    """
+    T1= np.load(T1)
+    T2= np.load(T2)
+    
+    data_dir= Path(data_dir)
+    obj_file = list(data_dir.rglob("*.ply"))[0]
+    print("Loading SMPL from:", obj_file)
+    mesh = vedo.Mesh(obj_file.as_posix())
+    xyz= mesh.vertices
+
+    xyz= normalize.transform_points(T1, xyz)
+    xyz= normalize.transform_points(T2, xyz)
+    return xyz
+
 def create_splats_with_optimizers(
     parser: Parser,
     init_type: str = "sfm",
@@ -227,12 +260,12 @@ def create_splats_with_optimizers(
 ) -> Tuple[torch.nn.ParameterDict, torch.optim.Optimizer]:
     """
     splats is a dictionary of parameters
-        - means3d
-        - scales
-        - quats
-        - opacities
-        - sh0
-        - shN
+        - means3d (N, 3)
+        - scales (N, 3)
+        - quats (N, 4)
+        - opacities (N,)
+        - sh0 (N, 1, 3)
+        - shN (N, 16, 3)
         - features (not by deafult)
         - colors (not by default)
     
@@ -427,11 +460,23 @@ class Runner:
                 device=self.device,
             )
             try:
+                raise NotImplementedError("Ply file not implemented")
                 self.SMPL= load_SMPL_file_obj(self.cfg.data_dir, f"{self.config_dir}/T1.npy", f"{self.config_dir}/T2.npy")
                 self.SMPL= torch.from_numpy(self.SMPL).to(self.device)
-            except IndexError:
+            except:
                 self.SMPL= None
                 print("SMPL .obj file not found")
+            try:
+                raise NotImplementedError("Ply file not implemented")
+                self.SMPL= load_SMPL_file_ply(self.cfg.data_dir, f"{self.config_dir}/T1.npy", f"{self.config_dir}/T2.npy")
+                self.SMPL= torch.from_numpy(self.SMPL).to(self.device)
+            except:
+                self.SMPL= None
+                print("SMPL .ply file not found")
+            if cfg.masked:
+                print("Masked training")
+            else:
+                print("No mask training")
         else:
             # resume is True, we are resuming from a checkpoint
             # we are resuming from a checkpoint
@@ -448,12 +493,21 @@ class Runner:
                 device=self.device,
             )
             try:
+                raise NotImplementedError("Ply file not implemented")
                 self.SMPL= load_SMPL_file_obj(self.cfg.data_dir, f"{self.config_dir}/T1.npy", f"{self.config_dir}/T2.npy")
                 self.SMPL= torch.from_numpy(self.SMPL).to(self.device)
-            except IndexError:
+            except:
                 self.SMPL= None
                 print("SMPL .obj file not found")
-
+            try:
+                raise NotImplementedError("Ply file not implemented")
+                self.SMPL= load_SMPL_file_ply(self.cfg.data_dir, f"{self.config_dir}/T1.npy", f"{self.config_dir}/T2.npy")
+                self.SMPL= torch.from_numpy(self.SMPL).to(self.device)
+                
+            except:
+                self.SMPL= None
+                print("SMPL .ply file not found")
+        # print(f"SMPL loaded {self.SMPL.shape if self.SMPL is not None else None}")
         print("Model initialized. Number of GS:", len(self.splats["means3d"]))
 
         self.pose_optimizers = []
@@ -498,7 +552,11 @@ class Runner:
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True).to(
             self.device
         )
+        self.ffl = FFL(loss_weight=1.0, alpha=1.0)  # initialize nn.Module class
 
+
+        # self.laplacian_loss = LaplacianPyramidLoss().to(self.device)
+        # self.perceptual_loss = PerceptualLoss().to(self.device)
         # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
@@ -571,31 +629,34 @@ class Runner:
         scale_loss = torch.log(scales.max(dim=0).values / scales.min(dim=0).values).mean()
         return scale_loss
     
-    def near_splat_loss(self) -> Tensor:
+    @torch.no_grad()
+    def nea_splat_reg(self) -> Tensor:
         """
         For every guassian splat, get the nearest splat and calculate the difference in their colors and rotations
         """
-        tree = cKDTree(self.splats["means3d"].cpu().detach().numpy())
-        _, indices = tree.query(self.splats["means3d"].cpu().detach().numpy(), k=4)
-        # distances (N, k=4)
-        # indices (N, k=4)
-        indices = torch.from_numpy(indices).to(self.device) # (N, k=4)
-        # get the nearest splats
-        nearest_splats = self.splats["means3d"][indices[:, 1:]] # (N, k=4-1, 3)
-        nearest_quats = self.splats["quats"][indices[:, 1:]] # (N, k=4-1, 4)
-        # nearest_colors = self.splats["colors"][indices[:, 1]]
+        means3d_np = self.splats["means3d"].cpu().detach().numpy()
 
-        # Expand current splats and quats to match nearest splats and quats dimensions for broadcasting
-        current_splats = self.splats["means3d"].unsqueeze(1).expand_as(nearest_splats)  # (N, k-1, 3)
-        current_quats = self.splats["quats"].unsqueeze(1).expand_as(nearest_quats)      # (N, k-1, 4)
+        tree = cKDTree(means3d_np)
+        
+        # Query the tree to find the 10 nearest neighbors for each splat (including itself)
+        _, indices = tree.query(means3d_np, k=10)
 
-        # Calculate distances and quaternion differences
-        distances = torch.norm(nearest_splats - current_splats, dim=2)  # (N, k-1)
-        quat_diffs = torch.norm(nearest_quats - current_quats, dim=2)   # (N, k-1)
+        # Convert indices to a PyTorch tensor
+        indices = torch.tensor(indices[:, 1:], device=self.splats["means3d"].device)  # Ignore self, use only neighbors
 
-        # Calculate the loss using vectorized operations
-        loss = (distances * quat_diffs).mean()
-        return loss
+        # Get the opacities of the splats
+        opacities = self.splats["opacities"]
+        
+        # Gather the opacities of the nearest neighbors
+        neighbor_opacities = opacities[indices]
+        
+        # Calculate the differences in opacities with neighbors
+        opacity_diffs = torch.abs(opacities.unsqueeze(1) - neighbor_opacities)
+        
+        # Sum the differences and average
+        opacity_reg_term = opacity_diffs.sum() / (opacities.shape[0] * 10)  # Normalize by the number of comparisons
+
+        return opacity_reg_term
     
     def SMPL_loss(self) -> Tensor:
         """
@@ -618,8 +679,7 @@ class Runner:
     @torch.no_grad()
     def SMPL_far_filter(self, tolerance: float= 0.1)-> None:
         """
-        remove gaussians which are far from the SMPL mesh and very transparent
-        This is done only at the last step
+        remove gaussians which are far from the SMPL mesh 
         """
         tree = cKDTree(self.SMPL.cpu().detach().numpy())
         distances, indices = tree.query(self.splats["means3d"].cpu().detach().numpy(), k=1)
@@ -628,6 +688,7 @@ class Runner:
         # indices (N,)
         # opacities= torch.sigmoid(self.splats["opacities"]).cpu().detach().numpy()
         near_indices= distances < tolerance
+        return near_indices
         self.splats["means3d"]= self.splats["means3d"][near_indices]
         self.splats["scales"]= self.splats["scales"][near_indices]
         self.splats["quats"]= self.splats["quats"][near_indices]
@@ -707,6 +768,10 @@ class Runner:
             except StopIteration:
                 trainloader_iter = iter(trainloader)
                 data = next(trainloader_iter)
+            except Exception as e:
+                print(e, )
+                continue
+                
 
             camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
             Ks = data["K"].to(device)  # [1, 3, 3]
@@ -748,6 +813,7 @@ class Runner:
             else:
                 colors, depths = renders, None
 
+            # colors is of shape [1, H, W, 3]
             if cfg.random_bkgd:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
@@ -757,20 +823,36 @@ class Runner:
             # loss
             # colors is the rendered image
             # pixels is the ground truth image
+            # mask the rendered image so as to only consider the pixels where the mask is 1
+            
+            if cfg.masked is True:
+                mask = torch.clamp(data["mask"].to(device), min=0.0, max=1.0 ).unsqueeze(-1) # [1, H, W, 1]
+                mask = mask.expand(-1, -1, -1, 3)  # Now mask has shape [1, H, W, 3]
+                mask = (mask >= 0.5).float()  # Convert to binary mask with values 0 or 1
+                # with torch.no_grad():
+                    # mask is used to mask the rendered image
+                colors = colors * mask
+                # pixels = pixels * mask # it is already masked from the data loader
+                    # raise NotImplementedError("Masking not implemented")
+
+
+            
             l1loss = F.l1_loss(colors, pixels)
-            l2loss = F.mse_loss(colors, pixels)
+            # l2loss = F.mse_loss(colors, pixels)
             ssimloss = 1.0 - self.ssim(
                 pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)
-            )
-            # lpipsloss = self.lpips(pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2)/255.0)
+            ) # 1.0 - SSIM required since we want SSIM to be maximized
             # scale_loss = self.splat_scale_loss()
-            # nearby_splat_loss = self.near_splat_loss()
+            # nearby_splat_reg = self.nea_splat_reg()
             # SMPL_loss = self.SMPL_loss()
+            # print("XXXXXXX",colors.shape, pixels.shape)
+            # laplacian_loss = self.laplacian_loss(colors, pixels)
+            # perceptual_loss = self.perceptual_loss(colors, pixels)
+            # ffl_loss= self.ffl(pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2))
             loss = l1loss * (1.0 - cfg.ssim_lambda) + \
-                ssimloss * cfg.ssim_lambda +  l2loss * 0.3  \
-            #     scale_loss * 0.7 + \
+                ssimloss * cfg.ssim_lambda#+ ffl_loss#perceptual_loss * 0.6 #+ laplacian_loss *0.4
+            #      + \
             #    + \
-            #     lpipsloss * 0.7 + \
             #     SMPL_loss * 0.7 
                 # nearby_splat_loss
             # loss= SMPL_loss * 0.3+ nearby_splat_loss * 0.7
@@ -831,10 +913,12 @@ class Runner:
                     self.writer.add_image("train/render", canvas, step)
                 self.writer.flush()
 
-            if self.total_splats() > cfg.max_gaussians and cfg.refine_stop_iter > step:
-                print("Max splats reached. Stopping refinement.")
-                cfg.refine_stop_iter = step
-            
+
+            if cfg.max_gaussians is not None and step < cfg.refine_stop_iter:
+                if self.total_splats() > cfg.max_gaussians:
+                    print("Max splats reached. Stopping refinement.")
+                    cfg.refine_stop_iter = step
+
             # update running stats for prunning & growing
             if step < cfg.refine_stop_iter:
                 self.update_running_stats(info)
@@ -922,6 +1006,16 @@ class Runner:
             for scheduler in schedulers:
                 scheduler.step()
 
+            # if self.SMPL is not None and step %100 == 0 and self.cfg.use_SMPL:
+            #     keep_indices= torch.tensor(self.SMPL_far_filter(0.05))
+            #     is_prune = ~keep_indices
+            #     n_prune = is_prune.sum().item()
+            #     self.refine_keep(~is_prune)
+            #     print(
+            #         f"Step {step}: {n_prune} GSs pruned from SMPL "
+            #         f"Now having {len(self.splats['means3d'])} GSs."
+            #     )
+
             # at save steps we save the model, config files
             # we can later continue training from any of these checkpoints
             if step in [i - 1 for i in cfg.save_steps]:
@@ -949,44 +1043,67 @@ class Runner:
                 print(f"PLY file saved to {self.ply_dir}/save_{step}.ply")
                 # save the config file
             if step == max_steps - 1: # last step
-                mem = torch.cuda.max_memory_allocated() / 1024**3
-                stats = {
-                    "mem": mem,
-                    "ellipse_time": time.time() - global_tic,
-                    "num_GS": len(self.splats["means3d"]),
-                }
-                print("Step: ", step, stats)
-                with open(f"{self.stats_dir}/save_step_{step}.json", "w") as f:
-                    json.dump(stats, f)
+                # mem = torch.cuda.max_memory_allocated() / 1024**3
+                # stats = {
+                #     "mem": mem,
+                #     "ellipse_time": time.time() - global_tic,
+                #     "num_GS": len(self.splats["means3d"]),
+                # }
+                # print("Step: ", step, stats)
+                # with open(f"{self.stats_dir}/save_step_{step}.json", "w") as f:
+                #     json.dump(stats, f)
                     
+                # torch.save(
+                #     {
+                #         "step": step,
+                #         "splats": self.splats.state_dict(),
+                #     },
+                #     f"{self.ckpt_dir}/ckpt_{step}.pt",
+                # )
+                # # save the ply file only on save steps not on eval steps
+                # # on eval steps we only want to evaluate the model
+                # self.save_ply(step)
+                # print(f"PLY file saved to {self.ply_dir}/save_{step}.ply")
+                # self.eval(step)
+
+                if self.SMPL is not None and self.cfg.use_SMPL:
+                    # Remove far splats
+                    print("Filtering far splats")
+                    keep_indices= torch.tensor(self.SMPL_far_filter(0.05))
+                    is_prune = ~keep_indices
+                    n_prune = is_prune.sum().item()
+                    self.refine_keep(~is_prune)
+                    print(
+                        f"Step {step}: {n_prune} GSs pruned from SMPL "
+                        f"Now having {len(self.splats['means3d'])} GSs."
+                    )
+                    
+                    # save .ply file
+                    self.save_ply(step, "_filtered")
+                    print(f"PLY file saved to {self.ply_dir}/save_{step}_filtered.ply")
+
+                    # save .pt file
+                    torch.save(
+                        {
+                            "step": step,
+                            "splats": self.splats.state_dict(),
+                        },
+                        f"{self.ckpt_dir}/ckpt_{step}_filtered.pt",
+                    )
+                
+                else:
+                    print("SMPL not found, skipping filtering")
+
+                self.save_ply(step,)
+
+                # save .pt file
                 torch.save(
                     {
                         "step": step,
                         "splats": self.splats.state_dict(),
                     },
                     f"{self.ckpt_dir}/ckpt_{step}.pt",
-                )
-                # save the ply file only on save steps not on eval steps
-                # on eval steps we only want to evaluate the model
-                self.save_ply(step)
-                print(f"PLY file saved to {self.ply_dir}/save_{step}.ply")
-                self.eval(step)
-
-                # Remove far splats
-                if self.SMPL is not None:
-                    print("Filtering far splats")
-                    self.SMPL_far_filter()
-                    self.save_ply(step, "_filtered")
-                    print(f"PLY file saved to {self.ply_dir}/save_{step}_filtered.ply")
-                else:
-                    print("SMPL not found, skipping filtering")
-                # torch.save(
-                #     {
-                #         "step": step,
-                #         "splats": self.splats.state_dict(),
-                #     },
-                #     f"{self.ckpt_dir}/ckpt_{step}_filtered.pt",
-                # ) # this would cause error with run0->run1->run2
+                ) # this would cause error with run0->run1->run2
 
                 # save the config file
                 self.save_config(step)
@@ -1318,6 +1435,16 @@ class Runner:
 
     # Experimental
     def construct_list_of_attributes(self):
+        """
+        The ply file contains the following attributes:
+        - x, y, z: 
+        - nx, ny, nz: All zeros
+        - f_dc_i: i=0,1,2 ... 3*sh_degree
+        - f_rest_i: i=0,1,2 ... 3*sh_degree
+        - opacity:
+        - scale_0 scale_1 scale_2: 
+        - rot_0 rot_1 rot_2 rot_3:
+        """
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
         # All channels except the 3 DC
         for i in range(self.splats["sh0"].shape[1]*self.splats["sh0"].shape[2]):
@@ -1388,6 +1515,7 @@ def main(cfg: Config):
         # resume training from the from some checkpoint
         # a new run_id folder is creataed where all the results will be saved
         cfg= cfg.read_json_and_make_config()
+        cfg.adjust_steps(factor= cfg.steps_scaler)
         # cfg.run += 1 # no need to increase since it is done in bash script
         ckpt = torch.load(cfg.ckpt, map_location= "cuda")
         runner = Runner(cfg)
@@ -1413,7 +1541,7 @@ def main(cfg: Config):
             runner.save_config(config_file_path)
 
         else:
-            # run full training loop
+            # run full training loop from scratch
             runner.train()
 
     if not cfg.disable_viewer:

@@ -105,14 +105,16 @@ for jpg in tqdm(all_jpgs):
 
         
         for i, (mask, score) in enumerate(zip(masks, scores)):
-            # dilate mask before combining
-            kernel = np.ones((5,5),np.uint8)
-            mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=1)
+            # dilate before adding to final mask
+            # kernel = np.ones((5,5),np.uint8)
+            # mask= cv2.dilate(mask.astype(np.uint8), kernel, iterations=4)
         
             final_mask= np.logical_or(final_mask, mask)
 
 
-
+    # Erode the final mask
+    kernel = np.ones((3,3),np.uint8)
+    final_mask = cv2.erode(final_mask.astype(np.uint8), kernel, iterations=1)
     # Save mask
     if just_one is False: # save only when iterating over all images
         mask_name = jpg.replace("images", "masks_jpg")
@@ -126,3 +128,7 @@ for jpg in tqdm(all_jpgs):
         os.makedirs(os.path.dirname(masked_img_name), exist_ok=True)
         cv2.imwrite(masked_img_name, masked_img)
     
+mask_name = os.path.dirname(jpg.replace("images", "masks_jpg"))
+print(f"Mask saved at         {mask_name}")
+masked_img_name= os.path.dirname(jpg.replace("images", "masked_images_bbox"))
+print(f"Masked image saved at {masked_img_name}")

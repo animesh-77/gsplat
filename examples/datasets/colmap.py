@@ -163,6 +163,9 @@ class Parser:
         image_files = sorted(_get_rel_paths(image_dir))
         try:
             image_files.remove("Thumbs.db")
+        except ValueError:
+            pass
+        try:
             colmap_files.remove("Thumbs.db")
         except ValueError:
             pass
@@ -208,9 +211,12 @@ class Parser:
         self.image_paths = image_paths  # List[str], (num_images,)
         if self.masked is True:
             # self.masks_paths = [img_path.replace("images", "masks_bb_jpg") for img_path in image_paths]
-            self.masks_paths = [img_path.replace("images", "masks_jpg") for img_path in image_paths]
+            self.masks_paths = ([img_path.replace("images", "masks").replace('jpg','png').replace('JPG', 'png') 
+                                 for img_path in image_paths]
+                                 )
             # self.masks_paths = [img_path.replace("undistorted", "undistorted_masks_jpg") for img_path in image_paths]
-            assert os.path.exists(self.masks_paths[0]), f"Mask file {self.masks_paths} does not exist."
+            for mask_path in self.masks_paths:
+                assert os.path.exists(mask_path), f"Mask file {self.masks_paths[0]} does not exist."
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
@@ -329,7 +335,8 @@ class Dataset:
             mask= np.where(mask>10, 255, 0)
             # (H, W) 0=background, 255=foreground
         else:
-            mask = np.ones_like(image, dtype=np.uint8)*255
+            pass
+            # mask = np.ones(image.shape[:2], dtype=np.uint8)*255 # (H, W) 
         camera_id = self.parser.camera_ids[index]
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]
@@ -360,18 +367,27 @@ class Dataset:
             K[0, 2] -= x
             K[1, 2] -= y
 
-        # Apply the mask to the image
-        idx = mask == 0 # all the background pixels
-        masked_image= image.copy()
-        masked_image[idx] = 0
-    
-        data = {
-            "K": torch.from_numpy(K).float(),
-            "camtoworld": torch.from_numpy(camtoworlds).float(),
-            "image": torch.from_numpy(masked_image).float(),
-            "image_id": item,  # the index of the image in the dataset
-            "mask": torch.from_numpy(mask).float(),
-        }
+        try:
+            # Apply the mask to the image
+            idx = mask == 0 # all the background pixels shape of mask is (H, W)
+            masked_image= image.copy() # :TODO need to add a try block here
+            masked_image[idx] = 0
+        
+            data = {
+                "K": torch.from_numpy(K).float(),
+                "camtoworld": torch.from_numpy(camtoworlds).float(),
+                "image": torch.from_numpy(masked_image).float(),
+                "image_id": item,  # the index of the image in the dataset
+                "mask": torch.from_numpy(mask).float(),
+            }
+        except:
+            data = {
+                "K": torch.from_numpy(K).float(),
+                "camtoworld": torch.from_numpy(camtoworlds).float(),
+                "image": torch.from_numpy(image).float(),
+                "image_id": item,  # the index of the image in the dataset
+            }
+
 
         if self.load_depths:
             # in default case, self.load_depths is False
