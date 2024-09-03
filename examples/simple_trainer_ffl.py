@@ -22,6 +22,7 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from focal_frequency_loss import FocalFrequencyLoss as FFL
 
 from utils import (
     AppearanceOptModule,
@@ -551,6 +552,7 @@ class Runner:
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True).to(
             self.device
         )
+        self.ffl = FFL(loss_weight=1.0, alpha=1.0)  # initialize nn.Module class
 
 
         # self.laplacian_loss = LaplacianPyramidLoss().to(self.device)
@@ -846,8 +848,9 @@ class Runner:
             # print("XXXXXXX",colors.shape, pixels.shape)
             # laplacian_loss = self.laplacian_loss(colors, pixels)
             # perceptual_loss = self.perceptual_loss(colors, pixels)
+            ffl_loss= self.ffl(pixels.permute(0, 3, 1, 2), colors.permute(0, 3, 1, 2))
             loss = l1loss * (1.0 - cfg.ssim_lambda) + \
-                ssimloss * cfg.ssim_lambda#perceptual_loss * 0.6 #+ laplacian_loss *0.4
+                ssimloss * cfg.ssim_lambda+ ffl_loss #perceptual_loss * 0.6 #+ laplacian_loss *0.4
             #      + \
             #    + \
             #     SMPL_loss * 0.7 
